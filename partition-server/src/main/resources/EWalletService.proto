@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+package com.ewallet.partition.grpc;
+
+// Account Management Service
+message CreateAccountRequest {
+    string accountId = 1;
+    double initialBalance = 2;
+}
+
+message CreateAccountResponse {
+    bool success = 1;
+    string message = 2;
+    string partitionId = 3;
+}
+
+message GetBalanceRequest {
+    string accountId = 1;
+}
+
+message GetBalanceResponse {
+    double balance = 1;
+    bool success = 2;
+    string message = 3;
+}
+
+service AccountService {
+    rpc createAccount(CreateAccountRequest) returns (CreateAccountResponse);
+    rpc getBalance(GetBalanceRequest) returns (GetBalanceResponse);
+}
+
+// Transfer Service
+message TransferRequest {
+    string fromAccountId = 1;
+    string toAccountId = 2;
+    double amount = 3;
+    bool isSentByPrimary = 4;
+    string transactionId = 5;
+}
+
+message TransferResponse {
+    bool success = 1;
+    string message = 2;
+    string transactionId = 3;
+}
+
+// Two-Phase Commit Messages
+message PrepareRequest {
+    string transactionId = 1;
+    string accountId = 2;
+    double amount = 3;
+    string operation = 4; // DEBIT or CREDIT
+}
+
+message PrepareResponse {
+    bool canCommit = 1;
+    string transactionId = 2;
+}
+
+message CommitRequest {
+    string transactionId = 1;
+}
+
+message CommitResponse {
+    bool success = 1;
+}
+
+message AbortRequest {
+    string transactionId = 1;
+}
+
+message AbortResponse {
+    bool success = 1;
+}
+
+service TransferService {
+    rpc transfer(TransferRequest) returns (TransferResponse);
+    rpc prepare(PrepareRequest) returns (PrepareResponse);
+    rpc commit(CommitRequest) returns (CommitResponse);
+    rpc abort(AbortRequest) returns (AbortResponse);
+}
