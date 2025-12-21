@@ -58,7 +58,7 @@ public class PartitionServer {
                 .build();
 
         server.start();
-        System.out.println("Partition Server [" + partitionId + "] started on port " + port);
+        System.out.println("Partition Server [" + partitionId + "] started and ready on port " + port);
 
         // Register with name service
         registerWithNameService();

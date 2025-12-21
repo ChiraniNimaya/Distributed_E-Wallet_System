@@ -73,7 +73,7 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
             response = GetBalanceResponse.newBuilder()
                     .setBalance(0.0)
                     .setSuccess(false)
-                    .setMessage("Account not found in this partition")
+                    .setMessage("Account not found")
                     .build();
         }
 

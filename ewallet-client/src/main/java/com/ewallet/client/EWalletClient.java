@@ -166,7 +166,7 @@ public class EWalletClient {
                 GetBalanceResponse response = stub.getBalance(request);
 
                 if (response.getSuccess()) {
-                    System.out.println("✓ Balance for account " + accountId + ": $" +
+                    System.out.println("Balance for account " + accountId + ": $" +
                             String.format("%.2f", response.getBalance()));
                     channel.shutdown();
                     return;
@@ -178,7 +178,7 @@ public class EWalletClient {
             }
         }
 
-        System.out.println("✗ Account not found in any partition");
+        System.out.println(" Account not found in any partition");
     }
 
     private void transferMoney() {
