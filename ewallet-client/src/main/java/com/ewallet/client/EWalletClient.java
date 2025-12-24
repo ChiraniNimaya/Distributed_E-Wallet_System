@@ -2,14 +2,21 @@ package com.ewallet.client;
 
 import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
+import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
+import java.io.IOException;
 import java.util.Scanner;
 
 public class EWalletClient {
     private static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
     private Scanner scanner = new Scanner(System.in);
+
+    // Connection management fields
+    private ManagedChannel channel = null;
+    private String host = null;
+    private int port = -1;
 
     public static void main(String[] args) {
         String role = "client"; // default role
@@ -38,18 +45,22 @@ public class EWalletClient {
             System.out.print("\nSelect operation (1-3): ");
             String choice = scanner.nextLine().trim();
 
-            switch (choice) {
-                case "1":
-                    checkBalance();
-                    break;
-                case "2":
-                    transferMoney();
-                    break;
-                case "3":
-                    System.out.println("Goodbye!");
-                    return;
-                default:
-                    System.out.println("Invalid choice. Please try again.");
+            try {
+                switch (choice) {
+                    case "1":
+                        checkBalance();
+                        break;
+                    case "2":
+                        transferMoney();
+                        break;
+                    case "3":
+                        System.out.println("Thank you for banking with us, Goodbye!");
+                        return;
+                    default:
+                        System.out.println("Invalid choice. Please try again.");
+                }
+            } catch (Exception e) {
+                System.out.println("Error: " + e.getMessage());
             }
         }
     }
@@ -65,23 +76,27 @@ public class EWalletClient {
             System.out.print("\nSelect operation (1-3): ");
             String choice = scanner.nextLine().trim();
 
-            switch (choice) {
-                case "1":
-                    createAccount();
-                    break;
-                case "2":
-                    checkBalance();
-                    break;
-                case "3":
-                    System.out.println("Goodbye!");
-                    return;
-                default:
-                    System.out.println("Invalid choice. Please try again.");
+            try {
+                switch (choice) {
+                    case "1":
+                        createAccount();
+                        break;
+                    case "2":
+                        checkBalance();
+                        break;
+                    case "3":
+                        System.out.println("Thank you for banking with us, Goodbye!");
+                        return;
+                    default:
+                        System.out.println("Invalid choice. Please try again.");
+                }
+            } catch (Exception e) {
+                System.out.println("Error: " + e.getMessage());
             }
         }
     }
 
-    private void createAccount() {
+    private void createAccount() throws InterruptedException, IOException {
         System.out.print("Enter account ID: ");
         String accountId = scanner.nextLine().trim();
 
@@ -98,44 +113,21 @@ public class EWalletClient {
         String partitionId = determinePartition(accountId);
         System.out.println("Account will be created in partition: " + partitionId);
 
-        try {
-            // Connect to any replica of the partition (will forward to leader)
-            String serviceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
-            NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(serviceName);
+        // Fetch server details
+        String serviceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
+        fetchServerDetails(serviceName);
 
-            String host = serviceDetails.getIPAddress();
-            int port = serviceDetails.getPort();
+        // Initialize connection
+        initializeConnection();
 
-            ManagedChannel channel = ManagedChannelBuilder
-                    .forAddress(host, port)
-                    .usePlaintext()
-                    .build();
+        // Process create account request
+        processCreateAccountRequest(accountId, balance, partitionId);
 
-            AccountServiceGrpc.AccountServiceBlockingStub stub =
-                    AccountServiceGrpc.newBlockingStub(channel);
-
-            CreateAccountRequest request = CreateAccountRequest.newBuilder()
-                    .setAccountId(accountId)
-                    .setInitialBalance(balance)
-                    .build();
-
-            CreateAccountResponse response = stub.createAccount(request);
-
-            if (response.getSuccess()) {
-                System.out.println("✓ Account created successfully in partition: " + response.getPartitionId());
-            } else {
-                System.out.println("✗ Failed to create account: " + response.getMessage());
-            }
-
-            channel.shutdown();
-        } catch (Exception e) {
-            System.out.println("Error creating account: " + e.getMessage());
-            e.printStackTrace();
-        }
+        // Close connection
+        closeConnection();
     }
 
-    private void checkBalance() {
+    private void checkBalance() throws InterruptedException, IOException {
         System.out.print("Enter account ID: ");
         String accountId = scanner.nextLine().trim();
 
@@ -145,43 +137,34 @@ public class EWalletClient {
         for (String partitionId : partitions) {
             try {
                 String serviceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
-                NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-                NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(serviceName);
 
-                String host = serviceDetails.getIPAddress();
-                int port = serviceDetails.getPort();
+                // Fetch server details
+                fetchServerDetails(serviceName);
 
-                ManagedChannel channel = ManagedChannelBuilder
-                        .forAddress(host, port)
-                        .usePlaintext()
-                        .build();
+                // Initialize connection
+                initializeConnection();
 
-                AccountServiceGrpc.AccountServiceBlockingStub stub =
-                        AccountServiceGrpc.newBlockingStub(channel);
+                // Process balance check request
+                boolean success = processBalanceCheckRequest(accountId);
 
-                GetBalanceRequest request = GetBalanceRequest.newBuilder()
-                        .setAccountId(accountId)
-                        .build();
+                // Close connection
+                closeConnection();
 
-                GetBalanceResponse response = stub.getBalance(request);
-
-                if (response.getSuccess()) {
-                    System.out.println("Balance for account " + accountId + ": $" +
-                            String.format("%.2f", response.getBalance()));
-                    channel.shutdown();
-                    return;
+                if (success) {
+                    return; // Account found, exit method
                 }
-
-                channel.shutdown();
             } catch (Exception e) {
                 // Try next partition
+                if (channel != null) {
+                    closeConnection();
+                }
             }
         }
 
-        System.out.println(" Account not found in any partition");
+        System.out.println("Account not found in any partition");
     }
 
-    private void transferMoney() {
+    private void transferMoney() throws InterruptedException, IOException {
         System.out.print("Enter source account ID: ");
         String fromAccount = scanner.nextLine().trim();
 
@@ -200,45 +183,146 @@ public class EWalletClient {
         // Determine source partition
         String fromPartitionId = determinePartition(fromAccount);
 
-        try {
-            // Connect to the source account's partition
-            String serviceName = "partition_" + fromPartitionId + "_replica_" + getFirstReplicaPort(fromPartitionId);
-            NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(serviceName);
+        // Fetch server details
+        String serviceName = "partition_" + fromPartitionId + "_replica_" + getFirstReplicaPort(fromPartitionId);
+        fetchServerDetails(serviceName);
 
-            String host = serviceDetails.getIPAddress();
-            int port = serviceDetails.getPort();
+        // Initialize connection
+        initializeConnection();
 
-            ManagedChannel channel = ManagedChannelBuilder
-                    .forAddress(host, port)
-                    .usePlaintext()
-                    .build();
+        // Process transfer request
+        processTransferRequest(fromAccount, toAccount, amount);
 
-            TransferServiceGrpc.TransferServiceBlockingStub stub =
-                    TransferServiceGrpc.newBlockingStub(channel);
+        // Close connection
+        closeConnection();
+    }
 
-            TransferRequest request = TransferRequest.newBuilder()
-                    .setFromAccountId(fromAccount)
-                    .setToAccountId(toAccount)
-                    .setAmount(amount)
-                    .setTransactionId("")
-                    .setIsSentByPrimary(false)
-                    .build();
+    // Helper method to fetch server details from name service
+    private void fetchServerDetails(String serviceName) throws IOException, InterruptedException {
+        NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
+        NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(serviceName);
+        host = serviceDetails.getIPAddress();
+        port = serviceDetails.getPort();
+    }
 
-            System.out.println("Processing transfer...");
-            TransferResponse response = stub.transfer(request);
+    // Initialize connection to server
+    private void initializeConnection() {
+        System.out.println("Initializing connection to server at " + host + ":" + port);
+        channel = ManagedChannelBuilder
+                .forAddress(host, port)
+                .usePlaintext()
+                .build();
+        channel.getState(true);
+    }
 
-            if (response.getSuccess()) {
-                System.out.println("✓ Transfer completed successfully!");
-                System.out.println("  Transaction ID: " + response.getTransactionId());
-            } else {
-                System.out.println("✗ Transfer failed: " + response.getMessage());
-            }
-
+    // Close connection
+    private void closeConnection() {
+        if (channel != null) {
             channel.shutdown();
-        } catch (Exception e) {
-            System.out.println("Error during transfer: " + e.getMessage());
-            e.printStackTrace();
+        }
+    }
+
+    // Process create account request with connection state check
+    private void processCreateAccountRequest(String accountId, double balance, String partitionId)
+            throws InterruptedException, IOException {
+
+        AccountServiceGrpc.AccountServiceBlockingStub stub =
+                AccountServiceGrpc.newBlockingStub(channel);
+
+        ConnectivityState state = channel.getState(true);
+
+        while (state != ConnectivityState.READY) {
+            System.out.println("Service unavailable, looking for a service provider..");
+            String serviceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
+            fetchServerDetails(serviceName);
+            initializeConnection();
+            Thread.sleep(5000);
+            state = channel.getState(true);
+        }
+
+        CreateAccountRequest request = CreateAccountRequest.newBuilder()
+                .setAccountId(accountId)
+                .setInitialBalance(balance)
+                .build();
+
+        CreateAccountResponse response = stub.createAccount(request);
+
+        if (response.getSuccess()) {
+            System.out.println("Account created successfully in partition: " + response.getPartitionId());
+        } else {
+            System.out.println("Failed to create account: " + response.getMessage());
+        }
+    }
+
+    // Process balance check request with connection state check
+    private boolean processBalanceCheckRequest(String accountId)
+            throws InterruptedException, IOException {
+
+        AccountServiceGrpc.AccountServiceBlockingStub stub =
+                AccountServiceGrpc.newBlockingStub(channel);
+
+        ConnectivityState state = channel.getState(true);
+
+        while (state != ConnectivityState.READY) {
+            System.out.println("Service unavailable, looking for a service provider..");
+            fetchServerDetails("partition_" + determinePartition(accountId) + "_replica_" +
+                    getFirstReplicaPort(determinePartition(accountId)));
+            initializeConnection();
+            Thread.sleep(5000);
+            state = channel.getState(true);
+        }
+
+        GetBalanceRequest request = GetBalanceRequest.newBuilder()
+                .setAccountId(accountId)
+                .build();
+
+        GetBalanceResponse response = stub.getBalance(request);
+
+        if (response.getSuccess()) {
+            System.out.println("Balance for account " + accountId + ": $" +
+                    String.format("%.2f", response.getBalance()));
+            return true;
+        }
+
+        return false;
+    }
+
+    // Process transfer request with connection state check
+    private void processTransferRequest(String fromAccount, String toAccount, double amount)
+            throws InterruptedException, IOException {
+
+        TransferServiceGrpc.TransferServiceBlockingStub stub =
+                TransferServiceGrpc.newBlockingStub(channel);
+
+        ConnectivityState state = channel.getState(true);
+
+        while (state != ConnectivityState.READY) {
+            System.out.println("Service unavailable, looking for a service provider..");
+            String fromPartitionId = determinePartition(fromAccount);
+            String serviceName = "partition_" + fromPartitionId + "_replica_" +
+                    getFirstReplicaPort(fromPartitionId);
+            fetchServerDetails(serviceName);
+            initializeConnection();
+            Thread.sleep(5000);
+            state = channel.getState(true);
+        }
+
+        TransferRequest request = TransferRequest.newBuilder()
+                .setFromAccountId(fromAccount)
+                .setToAccountId(toAccount)
+                .setAmount(amount)
+                .setTransactionId("")
+                .setIsSentByPrimary(false)
+                .build();
+
+        System.out.println("Processing transfer...");
+        TransferResponse response = stub.transfer(request);
+
+        if (response.getSuccess()) {
+            System.out.println("Transfer completed successfully!");
+            System.out.println("Transaction ID: " + response.getTransactionId());
+        } else {
+            System.out.println("Transfer failed: " + response.getMessage());
         }
     }
 
