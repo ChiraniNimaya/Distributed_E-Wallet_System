@@ -25,26 +25,37 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
 
         System.out.println("Transfer request: " + fromAccount + " -> " + toAccount + ", amount=" + amount);
 
-        if (!server.isLeader() && !request.getIsSentByPrimary()) {
-            // Forward to leader
-            TransferResponse response = forwardToLeader(request);
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-            return;
-        }
-
-        // Check if this is within-partition or cross-partition transfer
-        boolean fromInThisPartition = server.hasAccount(fromAccount);
-        boolean toInThisPartition = server.hasAccount(toAccount);
-
         TransferResponse response;
 
-        if (fromInThisPartition && toInThisPartition) {
-            // Within-partition transfer
-            response = handleWithinPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+        if (server.isLeader()) {
+            // Act as primary
+            boolean fromInThisPartition = server.hasAccount(fromAccount);
+            boolean toInThisPartition = server.hasAccount(toAccount);
+
+            if (fromInThisPartition && toInThisPartition) {
+                // Within-partition transfer
+                response = handleWithinPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+            } else {
+                // Cross-partition transfer - use 2PC
+                response = handleCrossPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+            }
         } else {
-            // Cross-partition transfer - use 2PC
-            response = handleCrossPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+            // Act as secondary
+            if (request.getIsSentByPrimary()) {
+                System.out.println("Processing transfer on secondary, on Primary's command");
+                boolean fromInThisPartition = server.hasAccount(fromAccount);
+                boolean toInThisPartition = server.hasAccount(toAccount);
+
+                if (fromInThisPartition && toInThisPartition) {
+                    response = handleWithinPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+                } else {
+                    response = handleCrossPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+                }
+            } else {
+                // Forward to primary
+                System.out.println("Not leader, forwarding to primary...");
+                response = callPrimary(fromAccount, toAccount, amount, transactionId);
+            }
         }
 
         responseObserver.onNext(response);
@@ -80,8 +91,10 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         boolean creditCommitted = server.commitTransaction(transactionId + "_credit");
 
         if (debitCommitted && creditCommitted) {
-            // Replicate to backups
-            replicateTransferToBackups(fromAccount, toAccount, amount, transactionId);
+            // Replicate to secondaries if primary
+            if (server.isLeader()) {
+                replicateTransferToSecondaries(fromAccount, toAccount, amount, transactionId);
+            }
 
             return TransferResponse.newBuilder()
                     .setSuccess(true)
@@ -160,84 +173,77 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         responseObserver.onCompleted();
     }
 
-    private TransferResponse forwardToLeader(TransferRequest request) {
+    private TransferResponse callPrimary(String fromAccount, String toAccount, double amount, String transactionId) {
+        System.out.println("Calling Primary server");
         try {
-            String[] leaderData = server.getCurrentLeaderData();
-            if (leaderData == null) {
+            String[] currentLeaderData = server.getCurrentLeaderData();
+            if (currentLeaderData == null) {
                 return TransferResponse.newBuilder()
                         .setSuccess(false)
                         .setMessage("Leader not available")
                         .build();
             }
 
-            String leaderHost = leaderData[0];
-            int leaderPort = Integer.parseInt(leaderData[1]);
+            String IPAddress = currentLeaderData[0];
+            int port = Integer.parseInt(currentLeaderData[1]);
 
-            ManagedChannel channel = ManagedChannelBuilder
-                    .forAddress(leaderHost, leaderPort)
+            return callServer(fromAccount, toAccount, amount, transactionId, false, IPAddress, port);
+        } catch (Exception e) {
+            System.err.println("Error calling primary: " + e.getMessage());
+            return TransferResponse.newBuilder()
+                    .setSuccess(false)
+                    .setMessage("Error calling primary: " + e.getMessage())
+                    .build();
+        }
+    }
+
+    private TransferResponse callServer(String fromAccount, String toAccount, double amount,
+                                        String transactionId, boolean isSentByPrimary,
+                                        String IPAddress, int port) {
+        System.out.println("Call Server " + IPAddress + ":" + port);
+        ManagedChannel channel = null;
+        try {
+            channel = ManagedChannelBuilder
+                    .forAddress(IPAddress, port)
                     .usePlaintext()
                     .build();
 
             TransferServiceGrpc.TransferServiceBlockingStub stub =
                     TransferServiceGrpc.newBlockingStub(channel);
 
-            TransferRequest forwardRequest = TransferRequest.newBuilder()
-                    .setFromAccountId(request.getFromAccountId())
-                    .setToAccountId(request.getToAccountId())
-                    .setAmount(request.getAmount())
-                    .setTransactionId(request.getTransactionId())
-                    .setIsSentByPrimary(false)
+            TransferRequest request = TransferRequest.newBuilder()
+                    .setFromAccountId(fromAccount)
+                    .setToAccountId(toAccount)
+                    .setAmount(amount)
+                    .setTransactionId(transactionId)
+                    .setIsSentByPrimary(isSentByPrimary)
                     .build();
 
-            TransferResponse response = stub.transfer(forwardRequest);
-            channel.shutdown();
-
+            TransferResponse response = stub.transfer(request);
             return response;
-        } catch (Exception e) {
-            System.err.println("Error forwarding to leader: " + e.getMessage());
-            return TransferResponse.newBuilder()
-                    .setSuccess(false)
-                    .setMessage("Error forwarding to leader: " + e.getMessage())
-                    .build();
+        } finally {
+            if (channel != null) {
+                channel.shutdown();
+            }
         }
     }
 
-    private void replicateTransferToBackups(String fromAccount, String toAccount,
-                                            double amount, String transactionId) {
+    private void replicateTransferToSecondaries(String fromAccount, String toAccount,
+                                                double amount, String transactionId) {
         try {
-            List<String[]> backups = server.getOthersData();
-            System.out.println("Replicating transfer to " + backups.size() + " backups");
+            System.out.println("Replicating transfer to secondary servers");
+            List<String[]> othersData = server.getOthersData();
 
-            for (String[] backup : backups) {
-                String backupHost = backup[0];
-                int backupPort = Integer.parseInt(backup[1]);
+            for (String[] data : othersData) {
+                String IPAddress = data[0];
+                int port = Integer.parseInt(data[1]);
 
-                new Thread(() -> {
-                    try {
-                        ManagedChannel channel = ManagedChannelBuilder
-                                .forAddress(backupHost, backupPort)
-                                .usePlaintext()
-                                .build();
-
-                        TransferServiceGrpc.TransferServiceBlockingStub stub =
-                                TransferServiceGrpc.newBlockingStub(channel);
-
-                        TransferRequest replicaRequest = TransferRequest.newBuilder()
-                                .setFromAccountId(fromAccount)
-                                .setToAccountId(toAccount)
-                                .setAmount(amount)
-                                .setTransactionId(transactionId)
-                                .setIsSentByPrimary(true)
-                                .build();
-
-                        stub.transfer(replicaRequest);
-                        channel.shutdown();
-
-                        System.out.println("Replicated transfer to backup: " + backupHost + ":" + backupPort);
-                    } catch (Exception e) {
-                        System.err.println("Failed to replicate to backup: " + e.getMessage());
-                    }
-                }).start();
+                try {
+                    callServer(fromAccount, toAccount, amount, transactionId, true, IPAddress, port);
+                    System.out.println("Successfully replicated to " + IPAddress + ":" + port);
+                } catch (Exception e) {
+                    System.err.println("Failed to replicate to " + IPAddress + ":" + port);
+                }
             }
         } catch (Exception e) {
             System.err.println("Error during replication: " + e.getMessage());

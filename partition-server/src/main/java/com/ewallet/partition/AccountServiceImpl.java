@@ -24,29 +24,51 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
 
         CreateAccountResponse response;
 
-        if (!server.isLeader()) {
-            // Forward to leader
-            System.out.println("Not leader, forwarding to leader...");
-            response = forwardCreateAccountToLeader(request);
-        } else {
-            // Process as leader
-            boolean success = server.createAccount(accountId, initialBalance);
+        if (server.isLeader()) {
+            // Act as primary
+            try {
+                System.out.println("Creating account as Primary");
+                boolean success = server.createAccount(accountId, initialBalance);
 
-            if (success) {
-                // Replicate to backups
-                replicateToBackups(accountId, initialBalance);
+                if (success) {
+                    // Replicate to secondaries
+                    updateSecondaryServers(accountId, initialBalance);
+
+                    response = CreateAccountResponse.newBuilder()
+                            .setSuccess(true)
+                            .setMessage("Account created successfully")
+                            .setPartitionId(server.getPartitionId())
+                            .build();
+                } else {
+                    response = CreateAccountResponse.newBuilder()
+                            .setSuccess(false)
+                            .setMessage("Account already exists")
+                            .setPartitionId(server.getPartitionId())
+                            .build();
+                }
+            } catch (Exception e) {
+                System.out.println("Error while creating account: " + e.getMessage());
+                e.printStackTrace();
+                response = CreateAccountResponse.newBuilder()
+                        .setSuccess(false)
+                        .setMessage("Error: " + e.getMessage())
+                        .build();
+            }
+        } else {
+            // Act as secondary
+            if (request.getIsSentByPrimary()) {
+                System.out.println("Creating account on secondary, on Primary's command");
+                boolean success = server.createAccount(accountId, initialBalance);
 
                 response = CreateAccountResponse.newBuilder()
-                        .setSuccess(true)
-                        .setMessage("Account created successfully")
+                        .setSuccess(success)
+                        .setMessage(success ? "Account created on secondary" : "Failed to create account")
                         .setPartitionId(server.getPartitionId())
                         .build();
             } else {
-                response = CreateAccountResponse.newBuilder()
-                        .setSuccess(false)
-                        .setMessage("Account already exists")
-                        .setPartitionId(server.getPartitionId())
-                        .build();
+                // Forward to primary
+                System.out.println("Not leader, forwarding to primary...");
+                response = callPrimary(accountId, initialBalance);
             }
         }
 
@@ -73,7 +95,7 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
             response = GetBalanceResponse.newBuilder()
                     .setBalance(0.0)
                     .setSuccess(false)
-                    .setMessage("Account not found")
+                    .setMessage("Account not found in this partition")
                     .build();
         }
 
@@ -81,73 +103,73 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
         responseObserver.onCompleted();
     }
 
-    private CreateAccountResponse forwardCreateAccountToLeader(CreateAccountRequest request) {
+    private CreateAccountResponse callPrimary(String accountId, double initialBalance) {
+        System.out.println("Calling Primary server");
         try {
-            String[] leaderData = server.getCurrentLeaderData();
-            if (leaderData == null) {
+            String[] currentLeaderData = server.getCurrentLeaderData();
+            if (currentLeaderData == null) {
                 return CreateAccountResponse.newBuilder()
                         .setSuccess(false)
                         .setMessage("Leader not available")
                         .build();
             }
 
-            String leaderHost = leaderData[0];
-            int leaderPort = Integer.parseInt(leaderData[1]);
+            String IPAddress = currentLeaderData[0];
+            int port = Integer.parseInt(currentLeaderData[1]);
 
-            ManagedChannel channel = ManagedChannelBuilder
-                    .forAddress(leaderHost, leaderPort)
+            return callServer(accountId, initialBalance, false, IPAddress, port);
+        } catch (Exception e) {
+            System.err.println("Error calling primary: " + e.getMessage());
+            return CreateAccountResponse.newBuilder()
+                    .setSuccess(false)
+                    .setMessage("Error calling primary: " + e.getMessage())
+                    .build();
+        }
+    }
+
+    private CreateAccountResponse callServer(String accountId, double initialBalance,
+                                             boolean isSentByPrimary, String IPAddress, int port) {
+        System.out.println("Call Server " + IPAddress + ":" + port);
+        ManagedChannel channel = null;
+        try {
+            channel = ManagedChannelBuilder
+                    .forAddress(IPAddress, port)
                     .usePlaintext()
                     .build();
 
             AccountServiceGrpc.AccountServiceBlockingStub stub =
                     AccountServiceGrpc.newBlockingStub(channel);
 
-            CreateAccountResponse response = stub.createAccount(request);
-            channel.shutdown();
-
-            return response;
-        } catch (Exception e) {
-            System.err.println("Error forwarding to leader: " + e.getMessage());
-            return CreateAccountResponse.newBuilder()
-                    .setSuccess(false)
-                    .setMessage("Error forwarding to leader: " + e.getMessage())
+            CreateAccountRequest request = CreateAccountRequest.newBuilder()
+                    .setAccountId(accountId)
+                    .setInitialBalance(initialBalance)
+                    .setIsSentByPrimary(isSentByPrimary)
                     .build();
+
+            CreateAccountResponse response = stub.createAccount(request);
+            return response;
+        } finally {
+            if (channel != null) {
+                channel.shutdown();
+            }
         }
     }
 
-    private void replicateToBackups(String accountId, double balance) {
+    private void updateSecondaryServers(String accountId, double initialBalance) {
         try {
-            List<String[]> backups = server.getOthersData();
-            System.out.println("Replicating account creation to " + backups.size() + " backups");
+            System.out.println("Updating secondary servers");
+            List<String[]> othersData = server.getOthersData();
 
-            for (String[] backup : backups) {
-                String backupHost = backup[0];
-                int backupPort = Integer.parseInt(backup[1]);
+            for (String[] data : othersData) {
+                String IPAddress = data[0];
+                int port = Integer.parseInt(data[1]);
 
-                new Thread(() -> {
-                    try {
-                        ManagedChannel channel = ManagedChannelBuilder
-                                .forAddress(backupHost, backupPort)
-                                .usePlaintext()
-                                .build();
-
-                        AccountServiceGrpc.AccountServiceBlockingStub stub =
-                                AccountServiceGrpc.newBlockingStub(channel);
-
-                        // Internal replication call
-                        CreateAccountRequest replicaRequest = CreateAccountRequest.newBuilder()
-                                .setAccountId(accountId)
-                                .setInitialBalance(balance)
-                                .build();
-
-                        stub.createAccount(replicaRequest);
-                        channel.shutdown();
-
-                        System.out.println("Replicated to backup: " + backupHost + ":" + backupPort);
-                    } catch (Exception e) {
-                        System.err.println("Failed to replicate to backup: " + e.getMessage());
-                    }
-                }).start();
+                try {
+                    callServer(accountId, initialBalance, true, IPAddress, port);
+                    System.out.println("Successfully replicated to " + IPAddress + ":" + port);
+                } catch (Exception e) {
+                    System.err.println("Failed to replicate to " + IPAddress + ":" + port);
+                }
             }
         } catch (Exception e) {
             System.err.println("Error during replication: " + e.getMessage());
