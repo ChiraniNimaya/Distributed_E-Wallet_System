@@ -1,5 +1,6 @@
 package com.ewallet.partition;
 
+import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -9,6 +10,7 @@ import java.util.List;
 
 public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBase {
     private final PartitionServer server;
+    private static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
 
     public AccountServiceImpl(PartitionServer server) {
         this.server = server;
@@ -104,25 +106,38 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
     }
 
     private CreateAccountResponse callPrimary(String accountId, double initialBalance) {
-        System.out.println("Calling Primary server");
+        System.out.println("Calling Primary server via name service");
         try {
-            String[] currentLeaderData = server.getCurrentLeaderData();
-            if (currentLeaderData == null) {
-                return CreateAccountResponse.newBuilder()
-                        .setSuccess(false)
-                        .setMessage("Leader not available")
-                        .build();
+            // Discover primary/leader via name service
+            String leaderServiceName = "partition_" + server.getPartitionId() + "_leader";
+            NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
+            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
+
+            String IPAddress = serviceDetails.getIPAddress();
+            int port = serviceDetails.getPort();
+
+            System.out.println("Found leader at: " + IPAddress + ":" + port);
+            return callServer(accountId, initialBalance, false, IPAddress, port);
+
+        } catch (Exception e) {
+            System.err.println("Error discovering or calling primary: " + e.getMessage());
+
+            // Fallback: try using lock data
+            try {
+                String[] currentLeaderData = server.getCurrentLeaderData();
+                if (currentLeaderData != null) {
+                    String IPAddress = currentLeaderData[0];
+                    int port = Integer.parseInt(currentLeaderData[1]);
+                    System.out.println("Using fallback leader from lock: " + IPAddress + ":" + port);
+                    return callServer(accountId, initialBalance, false, IPAddress, port);
+                }
+            } catch (Exception ex) {
+                System.err.println("Fallback also failed: " + ex.getMessage());
             }
 
-            String IPAddress = currentLeaderData[0];
-            int port = Integer.parseInt(currentLeaderData[1]);
-
-            return callServer(accountId, initialBalance, false, IPAddress, port);
-        } catch (Exception e) {
-            System.err.println("Error calling primary: " + e.getMessage());
             return CreateAccountResponse.newBuilder()
                     .setSuccess(false)
-                    .setMessage("Error calling primary: " + e.getMessage())
+                    .setMessage("Leader not available")
                     .build();
         }
     }

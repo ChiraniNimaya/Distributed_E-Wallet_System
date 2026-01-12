@@ -1,5 +1,6 @@
 package com.ewallet.partition;
 
+import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -10,6 +11,7 @@ import java.util.UUID;
 
 public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImplBase {
     private final PartitionServer server;
+    private static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
 
     public TransferServiceImpl(PartitionServer server) {
         this.server = server;
@@ -174,25 +176,38 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
     }
 
     private TransferResponse callPrimary(String fromAccount, String toAccount, double amount, String transactionId) {
-        System.out.println("Calling Primary server");
+        System.out.println("Calling Primary server via name service");
         try {
-            String[] currentLeaderData = server.getCurrentLeaderData();
-            if (currentLeaderData == null) {
-                return TransferResponse.newBuilder()
-                        .setSuccess(false)
-                        .setMessage("Leader not available")
-                        .build();
+            // Discover primary/leader via name service
+            String leaderServiceName = "partition_" + server.getPartitionId() + "_leader";
+            NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
+            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
+
+            String IPAddress = serviceDetails.getIPAddress();
+            int port = serviceDetails.getPort();
+
+            System.out.println("Found leader at: " + IPAddress + ":" + port);
+            return callServer(fromAccount, toAccount, amount, transactionId, false, IPAddress, port);
+
+        } catch (Exception e) {
+            System.err.println("Error discovering or calling primary: " + e.getMessage());
+
+            // Fallback: try using lock data
+            try {
+                String[] currentLeaderData = server.getCurrentLeaderData();
+                if (currentLeaderData != null) {
+                    String IPAddress = currentLeaderData[0];
+                    int port = Integer.parseInt(currentLeaderData[1]);
+                    System.out.println("Using fallback leader from lock: " + IPAddress + ":" + port);
+                    return callServer(fromAccount, toAccount, amount, transactionId, false, IPAddress, port);
+                }
+            } catch (Exception ex) {
+                System.err.println("Fallback also failed: " + ex.getMessage());
             }
 
-            String IPAddress = currentLeaderData[0];
-            int port = Integer.parseInt(currentLeaderData[1]);
-
-            return callServer(fromAccount, toAccount, amount, transactionId, false, IPAddress, port);
-        } catch (Exception e) {
-            System.err.println("Error calling primary: " + e.getMessage());
             return TransferResponse.newBuilder()
                     .setSuccess(false)
-                    .setMessage("Error calling primary: " + e.getMessage())
+                    .setMessage("Leader not available")
                     .build();
         }
     }

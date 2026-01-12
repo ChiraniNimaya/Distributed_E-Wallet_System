@@ -118,17 +118,20 @@ public class TwoPhaseCommitCoordinator {
     private boolean prepareRemoteParticipant(String partitionId, String transactionId,
                                              String accountId, double amount, String operation) {
         try {
-            // Find the leader of the target partition
-            String serviceName = "partition_" + partitionId + "_leader";
+            // Find the leader of the target partition via name service
+            String leaderServiceName = "partition_" + partitionId + "_leader";
             NameServiceClient nsClient = new NameServiceClient(PartitionServer.NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
             try {
-                serviceDetails = nsClient.findService(serviceName);
+                serviceDetails = nsClient.findService(leaderServiceName);
+                System.out.println("Found partition " + partitionId + " leader via name service: " +
+                        serviceDetails.getIPAddress() + ":" + serviceDetails.getPort());
             } catch (Exception e) {
-                // Leader not registered, try any replica
-                serviceName = "partition_" + partitionId + "_replica_11001";
-                serviceDetails = nsClient.findService(serviceName);
+                // Fallback: try first replica
+                System.out.println("Leader not found, trying first replica of partition " + partitionId);
+                String replicaServiceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
+                serviceDetails = nsClient.findService(replicaServiceName);
             }
 
             String host = serviceDetails.getIPAddress();
@@ -161,15 +164,15 @@ public class TwoPhaseCommitCoordinator {
 
     private boolean commitRemoteParticipant(String partitionId, String transactionId) {
         try {
-            String serviceName = "partition_" + partitionId + "_leader";
+            String leaderServiceName = "partition_" + partitionId + "_leader";
             NameServiceClient nsClient = new NameServiceClient(PartitionServer.NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
             try {
-                serviceDetails = nsClient.findService(serviceName);
+                serviceDetails = nsClient.findService(leaderServiceName);
             } catch (Exception e) {
-                serviceName = "partition_" + partitionId + "_replica_11001";
-                serviceDetails = nsClient.findService(serviceName);
+                String replicaServiceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
+                serviceDetails = nsClient.findService(replicaServiceName);
             }
 
             String host = serviceDetails.getIPAddress();
@@ -199,15 +202,15 @@ public class TwoPhaseCommitCoordinator {
 
     private boolean abortRemoteParticipant(String partitionId, String transactionId) {
         try {
-            String serviceName = "partition_" + partitionId + "_leader";
+            String leaderServiceName = "partition_" + partitionId + "_leader";
             NameServiceClient nsClient = new NameServiceClient(PartitionServer.NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
             try {
-                serviceDetails = nsClient.findService(serviceName);
+                serviceDetails = nsClient.findService(leaderServiceName);
             } catch (Exception e) {
-                serviceName = "partition_" + partitionId + "_replica_11001";
-                serviceDetails = nsClient.findService(serviceName);
+                String replicaServiceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
+                serviceDetails = nsClient.findService(replicaServiceName);
             }
 
             String host = serviceDetails.getIPAddress();
@@ -232,6 +235,14 @@ public class TwoPhaseCommitCoordinator {
         } catch (Exception e) {
             System.err.println("Error aborting remote participant: " + e.getMessage());
             return false;
+        }
+    }
+
+    private String getFirstReplicaPort(String partitionId) {
+        if ("PARTITION_A".equals(partitionId)) {
+            return "11001";
+        } else {
+            return "12001";
         }
     }
 }
