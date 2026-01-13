@@ -92,6 +92,16 @@ public class DistributedLock implements Watcher {
         return client.getData(smallestNode, true);
     }
 
+    public boolean isLockOwner() throws KeeperException, InterruptedException {
+        try {
+            String smallestNode = findSmallestNodePath();
+            return smallestNode.equals(childPath) && isAcquired;
+        } catch (KeeperException.NoNodeException e) {
+            // Our node was deleted (session expired)
+            return false;
+        }
+    }
+
     public List<byte[]> getOthersData() throws KeeperException, InterruptedException {
         List<byte[]> result = new ArrayList<>();
         List<String> childrenNodePaths = client.getChildrenNodePaths(lockPath);

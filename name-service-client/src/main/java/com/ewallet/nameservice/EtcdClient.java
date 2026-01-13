@@ -30,6 +30,14 @@ public class EtcdClient {
         return serverResponse;
     }
 
+    // NEW: Delete method
+    public void delete(String key) throws IOException {
+        System.out.println("Deleting Key=" + key);
+        String deleteUrl = etcdAddress + "/v3/kv/deleterange";
+        String serverResponse = callEtcd(deleteUrl, buildDeleteRequestPayload(key));
+        System.out.println(serverResponse);
+    }
+
     private String callEtcd(String url, String payload) throws IOException {
         URL etcdUrl = new URL(url);
         HttpURLConnection connection = (HttpURLConnection) etcdUrl.openConnection();
@@ -75,5 +83,12 @@ public class EtcdClient {
         JSONObject putRequest = new JSONObject();
         putRequest.put("key", keyEncoded);
         return putRequest.toString();
+    }
+
+    private String buildDeleteRequestPayload(String key) {
+        String keyEncoded = Base64.getEncoder().encodeToString(key.getBytes());
+        JSONObject deleteRequest = new JSONObject();
+        deleteRequest.put("key", keyEncoded);
+        return deleteRequest.toString();
     }
 }

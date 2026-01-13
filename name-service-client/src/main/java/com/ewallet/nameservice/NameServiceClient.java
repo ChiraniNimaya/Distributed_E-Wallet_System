@@ -21,6 +21,18 @@ public class NameServiceClient {
                 .toString();
     }
 
+    public void registerService(String serviceName, String IPAddress, int port, String protocol)
+            throws IOException {
+        String serviceInfoValue = buildServerDetailsEntry(IPAddress, port, protocol);
+        etcdClient.put(serviceName, serviceInfoValue);
+        System.out.println("Registered service: " + serviceName);
+    }
+
+    public void deregisterService(String serviceName) throws IOException {
+        etcdClient.delete(serviceName);
+        System.out.println("Deregistered service: " + serviceName);
+    }
+
     public ServiceDetails findService(String serviceName) throws InterruptedException, IOException {
         System.out.println("Searching for details of service: " + serviceName);
         String etcdResponse = etcdClient.get(serviceName);
@@ -33,11 +45,6 @@ public class NameServiceClient {
             serviceDetails = new ServiceDetails().populate(etcdResponse);
         }
         return serviceDetails;
-    }
-
-    public void registerService(String serviceName, String IPAddress, int port, String protocol) throws IOException {
-        String serviceInfoValue = buildServerDetailsEntry(IPAddress, port, protocol);
-        etcdClient.put(serviceName, serviceInfoValue);
     }
 
     public class ServiceDetails {

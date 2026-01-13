@@ -103,7 +103,7 @@ public class EWalletClient {
 
         ManagedChannel channel = null;
         try {
-            String leaderServiceName = "partition_" + partitionId + "_leader";
+            String leaderServiceName = partitionId + "/leader";
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
@@ -165,10 +165,9 @@ public class EWalletClient {
         for (String partitionId : partitions) {
             ManagedChannel channel = null;
             try {
-                // Try to discover partition service via name service
-                String partitionServiceName = "partition_" + partitionId;
+                String leaderServiceName = partitionId + "/leader";
                 NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-                NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(partitionServiceName);
+                NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
 
                 String host = serviceDetails.getIPAddress();
                 int port = serviceDetails.getPort();
@@ -206,7 +205,7 @@ public class EWalletClient {
             }
         }
 
-        System.out.println("✗ Account not found in any partition");
+        System.out.println("Account not found in any partition");
     }
 
     private void transferMoney() {
@@ -229,10 +228,9 @@ public class EWalletClient {
 
         ManagedChannel channel = null;
         try {
-            // Discover partition service via name service
-            String partitionServiceName = "partition_" + fromPartitionId;
+            String leaderServiceName = fromPartitionId + "/leader";
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(partitionServiceName);
+            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
 
             String host = serviceDetails.getIPAddress();
             int port = serviceDetails.getPort();
