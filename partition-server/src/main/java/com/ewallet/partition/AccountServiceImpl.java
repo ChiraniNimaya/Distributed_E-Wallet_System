@@ -69,7 +69,7 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
                         .build();
             } else {
                 // Forward to primary
-                System.out.println("Not leader, forwarding to primary...");
+                System.out.println("Forwarding the request to primary");
                 response = callPrimary(accountId, initialBalance);
             }
         }
@@ -109,7 +109,7 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
         System.out.println("Calling Primary server via name service");
         try {
             // Discover primary/leader via name service
-            String leaderServiceName = "partition_" + server.getPartitionId() + "_leader";
+            String leaderServiceName = server.getPartitionId() + "/leader";
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
             NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
 

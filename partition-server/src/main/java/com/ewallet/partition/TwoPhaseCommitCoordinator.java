@@ -51,6 +51,11 @@ public class TwoPhaseCommitCoordinator {
 
         if (fromCommitted && toCommitted) {
             System.out.println("2PC completed successfully");
+            if (server.isLeader()) {
+                //TODO: Implement replication to affected partition secondaries
+                //replicateTransferToPartitionSecondaries(fromAccount, toAccount, amount, transactionId);
+            }
+
             return TransferResponse.newBuilder()
                     .setSuccess(true)
                     .setMessage("Cross-partition transfer completed successfully")
@@ -74,9 +79,9 @@ public class TwoPhaseCommitCoordinator {
         // Accounts starting with A-M go to PARTITION_A, N-Z go to PARTITION_B
         char firstChar = accountId.toUpperCase().charAt(0);
         if (firstChar >= 'A' && firstChar <= 'M') {
-            return "PARTITION_A";
+            return "PARTITION_0";
         } else {
-            return "PARTITION_B";
+            return "PARTITION_1";
         }
     }
 
@@ -119,7 +124,7 @@ public class TwoPhaseCommitCoordinator {
                                              String accountId, double amount, String operation) {
         try {
             // Find the leader of the target partition via name service
-            String leaderServiceName = "partition_" + partitionId + "_leader";
+            String leaderServiceName = partitionId + "/leader";
             NameServiceClient nsClient = new NameServiceClient(PartitionServer.NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
@@ -164,14 +169,14 @@ public class TwoPhaseCommitCoordinator {
 
     private boolean commitRemoteParticipant(String partitionId, String transactionId) {
         try {
-            String leaderServiceName = "partition_" + partitionId + "_leader";
+            String leaderServiceName = partitionId + "/leader";
             NameServiceClient nsClient = new NameServiceClient(PartitionServer.NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
             try {
                 serviceDetails = nsClient.findService(leaderServiceName);
             } catch (Exception e) {
-                String replicaServiceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
+                String replicaServiceName = partitionId + "/replica/" + getFirstReplicaPort(partitionId);
                 serviceDetails = nsClient.findService(replicaServiceName);
             }
 
@@ -202,14 +207,14 @@ public class TwoPhaseCommitCoordinator {
 
     private boolean abortRemoteParticipant(String partitionId, String transactionId) {
         try {
-            String leaderServiceName = "partition_" + partitionId + "_leader";
+            String leaderServiceName = partitionId + "/leader";
             NameServiceClient nsClient = new NameServiceClient(PartitionServer.NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
             try {
                 serviceDetails = nsClient.findService(leaderServiceName);
             } catch (Exception e) {
-                String replicaServiceName = "partition_" + partitionId + "_replica_" + getFirstReplicaPort(partitionId);
+                String replicaServiceName = partitionId + "/replica/" + getFirstReplicaPort(partitionId);
                 serviceDetails = nsClient.findService(replicaServiceName);
             }
 

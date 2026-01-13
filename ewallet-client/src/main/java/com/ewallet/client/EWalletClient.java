@@ -112,10 +112,11 @@ public class EWalletClient {
                 System.out.println("Found leader via name service: " +
                         serviceDetails.getIPAddress() + ":" + serviceDetails.getPort());
             } catch (Exception e) {
-                // Leader not found, try generic partition service (any replica will forward)
-                System.out.println("Leader not found, trying partition service...");
-                String partitionServiceName = "partition_" + partitionId;
-                serviceDetails = nsClient.findService(partitionServiceName);
+                System.out.println("Failed to find partition leader!");
+                System.out.println("  Partition: " + partitionId);
+                System.out.println("  Reason: " + e.getMessage());
+                System.out.println("  Please ensure the partition servers are running.");
+                return;
             }
 
             String host = serviceDetails.getIPAddress();
@@ -138,9 +139,9 @@ public class EWalletClient {
             CreateAccountResponse response = stub.createAccount(request);
 
             if (response.getSuccess()) {
-                System.out.println("✓ Account created successfully in partition: " + response.getPartitionId());
+                System.out.println("Account created successfully in partition: " + response.getPartitionId());
             } else {
-                System.out.println("✗ Failed to create account: " + response.getMessage());
+                System.out.println("Failed to create account: " + response.getMessage());
             }
         } catch (Exception e) {
             System.out.println("Error creating account: " + e.getMessage());
@@ -160,52 +161,52 @@ public class EWalletClient {
         System.out.print("Enter account ID: ");
         String accountId = scanner.nextLine().trim();
 
-        String[] partitions = {"PARTITION_A", "PARTITION_B"};
+        String partitionId = determinePartition(accountId);
+        System.out.println("Checking in partition: " + partitionId);
 
-        for (String partitionId : partitions) {
-            ManagedChannel channel = null;
-            try {
-                String leaderServiceName = partitionId + "/leader";
-                NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-                NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
+        ManagedChannel channel = null;
+        try {
+            String leaderServiceName = partitionId + "/leader";
+            NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
+            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
 
-                String host = serviceDetails.getIPAddress();
-                int port = serviceDetails.getPort();
+            String host = serviceDetails.getIPAddress();
+            int port = serviceDetails.getPort();
 
-                channel = ManagedChannelBuilder
-                        .forAddress(host, port)
-                        .usePlaintext()
-                        .build();
+            channel = ManagedChannelBuilder
+                    .forAddress(host, port)
+                    .usePlaintext()
+                    .build();
 
-                AccountServiceGrpc.AccountServiceBlockingStub stub =
-                        AccountServiceGrpc.newBlockingStub(channel);
+            AccountServiceGrpc.AccountServiceBlockingStub stub =
+                    AccountServiceGrpc.newBlockingStub(channel);
 
-                GetBalanceRequest request = GetBalanceRequest.newBuilder()
-                        .setAccountId(accountId)
-                        .build();
+            GetBalanceRequest request = GetBalanceRequest.newBuilder()
+                    .setAccountId(accountId)
+                    .build();
 
-                GetBalanceResponse response = stub.getBalance(request);
+            GetBalanceResponse response = stub.getBalance(request);
 
-                if (response.getSuccess()) {
-                    System.out.println("✓ Balance for account " + accountId + ": $" +
-                            String.format("%.2f", response.getBalance()));
-                    return;
-                }
-            } catch (Exception e) {
-                // Try next partition
-                System.out.println("Account not found in " + partitionId + ", trying next partition...");
-            } finally {
-                if (channel != null) {
-                    try {
-                        channel.shutdown().awaitTermination(2, TimeUnit.SECONDS);
-                    } catch (InterruptedException e) {
-                        channel.shutdownNow();
-                    }
+            if (response.getSuccess()) {
+                System.out.println("Balance for account " + accountId + ": $" +
+                        String.format("%.2f", response.getBalance()));
+            } else {
+                System.out.println("✗ " + response.getMessage());
+            }
+
+        } catch (Exception e) {
+            System.out.println("Error checking balance: " + e.getMessage());
+            System.out.println("  Account: " + accountId);
+            System.out.println("  Partition: " + partitionId);
+        } finally {
+            if (channel != null) {
+                try {
+                    channel.shutdown().awaitTermination(2, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    channel.shutdownNow();
                 }
             }
         }
-
-        System.out.println("Account not found in any partition");
     }
 
     private void transferMoney() {
@@ -225,6 +226,9 @@ public class EWalletClient {
         }
 
         String fromPartitionId = determinePartition(fromAccount);
+        String toPartitionId = determinePartition(toAccount);
+
+        System.out.println("Transfer route: " + fromPartitionId + " → " + toPartitionId);
 
         ManagedChannel channel = null;
         try {
@@ -235,7 +239,7 @@ public class EWalletClient {
             String host = serviceDetails.getIPAddress();
             int port = serviceDetails.getPort();
 
-            System.out.println("Connecting to partition service: " + host + ":" + port);
+            System.out.println("Connecting to source partition leader: " + host + ":" + port);
 
             channel = ManagedChannelBuilder
                     .forAddress(host, port)
@@ -257,10 +261,11 @@ public class EWalletClient {
             TransferResponse response = stub.transfer(request);
 
             if (response.getSuccess()) {
-                System.out.println("✓ Transfer completed successfully!");
+                System.out.println("Transfer completed successfully!");
                 System.out.println("  Transaction ID: " + response.getTransactionId());
+                System.out.println("  Amount: $" + String.format("%.2f", amount));
             } else {
-                System.out.println("✗ Transfer failed: " + response.getMessage());
+                System.out.println("Transfer failed: " + response.getMessage());
             }
         } catch (Exception e) {
             System.out.println("Error during transfer: " + e.getMessage());
@@ -284,23 +289,9 @@ public class EWalletClient {
 
         char firstChar = significantPart.toUpperCase().charAt(0);
         if (firstChar >= 'A' && firstChar <= 'M') {
-            return "PARTITION_A";
+            return "PARTITION_0";
         } else {
-            return "PARTITION_B";
+            return "PARTITION_1";
         }
-    }
-
-    private List<Integer> getReplicaPorts(String partitionId) {
-        List<Integer> ports = new ArrayList<>();
-        if ("PARTITION_A".equals(partitionId)) {
-            ports.add(11001);
-            ports.add(11002);
-            ports.add(11003);
-        } else {
-            ports.add(12001);
-            ports.add(12002);
-            ports.add(12003);
-        }
-        return ports;
     }
 }
