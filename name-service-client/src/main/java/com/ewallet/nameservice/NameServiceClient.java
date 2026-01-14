@@ -28,10 +28,6 @@ public class NameServiceClient {
         System.out.println("Registered service: " + serviceName);
     }
 
-    public void deregisterService(String serviceName) throws IOException {
-        etcdClient.delete(serviceName);
-        System.out.println("Deregistered service: " + serviceName);
-    }
 
     public ServiceDetails findService(String serviceName) throws InterruptedException, IOException {
         System.out.println("Searching for details of service: " + serviceName);

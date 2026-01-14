@@ -30,14 +30,6 @@ public class EtcdClient {
         return serverResponse;
     }
 
-    // NEW: Delete method
-    public void delete(String key) throws IOException {
-        System.out.println("Deleting Key=" + key);
-        String deleteUrl = etcdAddress + "/v3/kv/deleterange";
-        String serverResponse = callEtcd(deleteUrl, buildDeleteRequestPayload(key));
-        System.out.println(serverResponse);
-    }
-
     private String callEtcd(String url, String payload) throws IOException {
         URL etcdUrl = new URL(url);
         HttpURLConnection connection = (HttpURLConnection) etcdUrl.openConnection();

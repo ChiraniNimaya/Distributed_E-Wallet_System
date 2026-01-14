@@ -93,7 +93,7 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         boolean creditCommitted = server.commitTransaction(transactionId + "_credit");
 
         if (debitCommitted && creditCommitted) {
-            // Replicate to secondaries if primary
+            // Replicate to secondaries if this is the leader
             if (server.isLeader()) {
                 replicateTransferToSecondaries(fromAccount, toAccount, amount, transactionId);
             }
@@ -136,6 +136,11 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
             canCommit = server.prepareCredit(transactionId, accountId, amount);
         }
 
+        // IMPORTANT: Replicate prepare to secondaries if this is the leader
+        if (canCommit && server.isLeader()) {
+            replicatePrepareToSecondaries(transactionId, accountId, amount, operation);
+        }
+
         PrepareResponse response = PrepareResponse.newBuilder()
                 .setCanCommit(canCommit)
                 .setTransactionId(transactionId)
@@ -152,6 +157,11 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
 
         boolean success = server.commitTransaction(transactionId);
 
+        // IMPORTANT: Replicate commit to secondaries if this is the leader
+        if (success && server.isLeader()) {
+            replicateCommitToSecondaries(transactionId);
+        }
+
         CommitResponse response = CommitResponse.newBuilder()
                 .setSuccess(success)
                 .build();
@@ -167,6 +177,11 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
 
         boolean success = server.abortTransaction(transactionId);
 
+        // IMPORTANT: Replicate abort to secondaries if this is the leader
+        if (success && server.isLeader()) {
+            replicateAbortToSecondaries(transactionId);
+        }
+
         AbortResponse response = AbortResponse.newBuilder()
                 .setSuccess(success)
                 .build();
@@ -179,7 +194,7 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         System.out.println("Calling Primary server via name service");
         try {
             // Discover primary/leader via name service
-            String leaderServiceName = server.getPartitionId() + "/leader";
+            String leaderServiceName = server.getPartitionId();
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
             NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
 
@@ -262,6 +277,145 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
             }
         } catch (Exception e) {
             System.err.println("Error during replication: " + e.getMessage());
+        }
+    }
+
+    // NEW: Replicate prepare operation to secondaries
+    private void replicatePrepareToSecondaries(String transactionId, String accountId,
+                                               double amount, String operation) {
+        try {
+            System.out.println("Replicating prepare to secondary servers");
+            List<String[]> othersData = server.getOthersData();
+
+            for (String[] data : othersData) {
+                String IPAddress = data[0];
+                int port = Integer.parseInt(data[1]);
+
+                ManagedChannel channel = null;
+                try {
+                    channel = ManagedChannelBuilder
+                            .forAddress(IPAddress, port)
+                            .usePlaintext()
+                            .build();
+
+                    TransferServiceGrpc.TransferServiceBlockingStub stub =
+                            TransferServiceGrpc.newBlockingStub(channel);
+
+                    PrepareRequest request = PrepareRequest.newBuilder()
+                            .setTransactionId(transactionId)
+                            .setAccountId(accountId)
+                            .setAmount(amount)
+                            .setOperation(operation)
+                            .build();
+
+                    PrepareResponse response = stub.prepare(request);
+
+                    if (response.getCanCommit()) {
+                        System.out.println("Successfully replicated prepare to " + IPAddress + ":" + port);
+                    } else {
+                        System.err.println("Secondary prepare failed: " + IPAddress + ":" + port);
+                    }
+
+                } catch (Exception e) {
+                    System.err.println("Failed to replicate prepare to " + IPAddress + ":" + port + " - " + e.getMessage());
+                } finally {
+                    if (channel != null) {
+                        channel.shutdown();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error during prepare replication: " + e.getMessage());
+        }
+    }
+
+    // NEW: Replicate commit operation to secondaries
+    private void replicateCommitToSecondaries(String transactionId) {
+        try {
+            System.out.println("Replicating commit to secondary servers");
+            List<String[]> othersData = server.getOthersData();
+
+            for (String[] data : othersData) {
+                String IPAddress = data[0];
+                int port = Integer.parseInt(data[1]);
+
+                ManagedChannel channel = null;
+                try {
+                    channel = ManagedChannelBuilder
+                            .forAddress(IPAddress, port)
+                            .usePlaintext()
+                            .build();
+
+                    TransferServiceGrpc.TransferServiceBlockingStub stub =
+                            TransferServiceGrpc.newBlockingStub(channel);
+
+                    CommitRequest request = CommitRequest.newBuilder()
+                            .setTransactionId(transactionId)
+                            .build();
+
+                    CommitResponse response = stub.commit(request);
+
+                    if (response.getSuccess()) {
+                        System.out.println("Successfully replicated commit to " + IPAddress + ":" + port);
+                    } else {
+                        System.err.println("Secondary commit failed: " + IPAddress + ":" + port);
+                    }
+
+                } catch (Exception e) {
+                    System.err.println("Failed to replicate commit to " + IPAddress + ":" + port + " - " + e.getMessage());
+                } finally {
+                    if (channel != null) {
+                        channel.shutdown();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error during commit replication: " + e.getMessage());
+        }
+    }
+
+    // NEW: Replicate abort operation to secondaries
+    private void replicateAbortToSecondaries(String transactionId) {
+        try {
+            System.out.println("Replicating abort to secondary servers");
+            List<String[]> othersData = server.getOthersData();
+
+            for (String[] data : othersData) {
+                String IPAddress = data[0];
+                int port = Integer.parseInt(data[1]);
+
+                ManagedChannel channel = null;
+                try {
+                    channel = ManagedChannelBuilder
+                            .forAddress(IPAddress, port)
+                            .usePlaintext()
+                            .build();
+
+                    TransferServiceGrpc.TransferServiceBlockingStub stub =
+                            TransferServiceGrpc.newBlockingStub(channel);
+
+                    AbortRequest request = AbortRequest.newBuilder()
+                            .setTransactionId(transactionId)
+                            .build();
+
+                    AbortResponse response = stub.abort(request);
+
+                    if (response.getSuccess()) {
+                        System.out.println("Successfully replicated abort to " + IPAddress + ":" + port);
+                    } else {
+                        System.err.println("Secondary abort failed: " + IPAddress + ":" + port);
+                    }
+
+                } catch (Exception e) {
+                    System.err.println("Failed to replicate abort to " + IPAddress + ":" + port + " - " + e.getMessage());
+                } finally {
+                    if (channel != null) {
+                        channel.shutdown();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error during abort replication: " + e.getMessage());
         }
     }
 }

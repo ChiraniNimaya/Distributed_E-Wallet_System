@@ -103,12 +103,12 @@ public class EWalletClient {
 
         ManagedChannel channel = null;
         try {
-            String leaderServiceName = partitionId + "/leader";
+            // Discover leader via name service (registered as partitionId only)
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
 
             NameServiceClient.ServiceDetails serviceDetails;
             try {
-                serviceDetails = nsClient.findService(leaderServiceName);
+                serviceDetails = nsClient.findService(partitionId);
                 System.out.println("Found leader via name service: " +
                         serviceDetails.getIPAddress() + ":" + serviceDetails.getPort());
             } catch (Exception e) {
@@ -166,9 +166,8 @@ public class EWalletClient {
 
         ManagedChannel channel = null;
         try {
-            String leaderServiceName = partitionId + "/leader";
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
+            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(partitionId);
 
             String host = serviceDetails.getIPAddress();
             int port = serviceDetails.getPort();
@@ -228,13 +227,12 @@ public class EWalletClient {
         String fromPartitionId = determinePartition(fromAccount);
         String toPartitionId = determinePartition(toAccount);
 
-        System.out.println("Transfer route: " + fromPartitionId + " → " + toPartitionId);
+        System.out.println("Transfer route: " + fromPartitionId + " to " + toPartitionId);
 
         ManagedChannel channel = null;
         try {
-            String leaderServiceName = fromPartitionId + "/leader";
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
+            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(fromPartitionId);
 
             String host = serviceDetails.getIPAddress();
             int port = serviceDetails.getPort();

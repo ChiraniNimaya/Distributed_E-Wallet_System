@@ -109,7 +109,7 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
         System.out.println("Calling Primary server via name service");
         try {
             // Discover primary/leader via name service
-            String leaderServiceName = server.getPartitionId() + "/leader";
+            String leaderServiceName = server.getPartitionId();
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
             NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
 
