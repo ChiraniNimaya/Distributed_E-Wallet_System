@@ -5,12 +5,21 @@ import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.stub.StreamObserver;
+import com.ewallet.lock.*;
+import org.apache.zookeeper.KeeperException;
 
 import java.util.List;
+import java.io.IOException;
+import java.util.UUID;
 
-public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBase {
+public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBase
+        implements DistributedTxListener {
+
     private final PartitionServer server;
-    private static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
+    public static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
+
+    private AccountData tempDataHolder;
+    private boolean transactionStatus = false;
 
     public AccountServiceImpl(PartitionServer server) {
         this.server = server;
@@ -19,60 +28,47 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
     @Override
     public void createAccount(CreateAccountRequest request,
                               StreamObserver<CreateAccountResponse> responseObserver) {
+
         String accountId = request.getAccountId();
         double initialBalance = request.getInitialBalance();
 
-        System.out.println("Received createAccount request: " + accountId);
-
-        CreateAccountResponse response;
-
         if (server.isLeader()) {
-            // Act as primary
             try {
                 System.out.println("Creating account as Primary");
-                boolean success = server.createAccount(accountId, initialBalance);
-
-                if (success) {
-                    // Replicate to secondaries
-                    updateSecondaryServers(accountId, initialBalance);
-
-                    response = CreateAccountResponse.newBuilder()
-                            .setSuccess(true)
-                            .setMessage("Account created successfully")
-                            .setPartitionId(server.getPartitionId())
-                            .build();
-                } else {
-                    response = CreateAccountResponse.newBuilder()
-                            .setSuccess(false)
-                            .setMessage("Account already exists")
-                            .setPartitionId(server.getPartitionId())
-                            .build();
-                }
+                startDistributedTx(accountId, initialBalance);
+                updateSecondaryServers(accountId, initialBalance);
+                System.out.println("Going to perform transaction");
+                ((DistributedTxCoordinator) server.getTransaction()).perform();
             } catch (Exception e) {
                 System.out.println("Error while creating account: " + e.getMessage());
                 e.printStackTrace();
-                response = CreateAccountResponse.newBuilder()
-                        .setSuccess(false)
-                        .setMessage("Error: " + e.getMessage())
-                        .build();
             }
         } else {
-            // Act as secondary
             if (request.getIsSentByPrimary()) {
+                // Request from primary - participate in distributed transaction
                 System.out.println("Creating account on secondary, on Primary's command");
-                boolean success = server.createAccount(accountId, initialBalance);
+                startDistributedTx(accountId, initialBalance);
 
-                response = CreateAccountResponse.newBuilder()
-                        .setSuccess(success)
-                        .setMessage(success ? "Account created on secondary" : "Failed to create account")
-                        .setPartitionId(server.getPartitionId())
-                        .build();
+                // Vote based on validation
+                if (!server.hasAccount(accountId)) {
+                    ((DistributedTxParticipant) server.getTransaction()).voteCommit();
+                } else {
+                    ((DistributedTxParticipant) server.getTransaction()).voteAbort();
+                }
             } else {
-                // Forward to primary
-                System.out.println("Forwarding the request to primary");
-                response = callPrimary(accountId, initialBalance);
+                // Request from client - forward to primary
+                CreateAccountResponse response = callPrimary(accountId, initialBalance);
+                if (response.getSuccess()) {
+                    transactionStatus = true;
+                }
             }
         }
+
+        CreateAccountResponse response = CreateAccountResponse
+                .newBuilder()
+                .setSuccess(transactionStatus)
+                .setPartitionId(server.getPartitionId())
+                .build();
 
         responseObserver.onNext(response);
         responseObserver.onCompleted();
@@ -81,73 +77,147 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
     @Override
     public void getBalance(GetBalanceRequest request,
                            StreamObserver<GetBalanceResponse> responseObserver) {
+
         String accountId = request.getAccountId();
-        System.out.println("Received getBalance request: " + accountId);
+        System.out.println("Received getBalance request for account: " + accountId);
 
         Double balance = server.getBalance(accountId);
 
-        GetBalanceResponse response;
+        // Found locally → return immediately
         if (balance != null) {
-            response = GetBalanceResponse.newBuilder()
-                    .setBalance(balance)
-                    .setSuccess(true)
-                    .setMessage("Balance retrieved successfully")
-                    .build();
-        } else {
-            response = GetBalanceResponse.newBuilder()
-                    .setBalance(0.0)
-                    .setSuccess(false)
-                    .setMessage("Account not found in this partition")
-                    .build();
+            responseObserver.onNext(
+                    GetBalanceResponse.newBuilder()
+                            .setBalance(balance)
+                            .setSuccess(true)
+                            .setMessage("Balance retrieved from partition " + server.getPartitionId())
+                            .build()
+            );
+            responseObserver.onCompleted();
+            return;
         }
 
-        responseObserver.onNext(response);
+        // If leader and not found → account does not exist
+        if (server.isLeader()) {
+            responseObserver.onNext(
+                    GetBalanceResponse.newBuilder()
+                            .setBalance(0.0)
+                            .setSuccess(false)
+                            .setMessage("Account not found in partition " + server.getPartitionId())
+                            .build()
+            );
+            responseObserver.onCompleted();
+            return;
+        }
+
+        // Not leader & not found → forward to leader
+        System.out.println("Account not found locally, forwarding getBalance to leader");
+
+        try {
+            GetBalanceResponse leaderResponse = callPrimaryGetBalance(accountId);
+            responseObserver.onNext(leaderResponse);
+        } catch (Exception e) {
+            responseObserver.onNext(
+                    GetBalanceResponse.newBuilder()
+                            .setBalance(0.0)
+                            .setSuccess(false)
+                            .setMessage("Failed to contact leader")
+                            .build()
+            );
+        }
+
         responseObserver.onCompleted();
     }
 
-    private CreateAccountResponse callPrimary(String accountId, double initialBalance) {
-        System.out.println("Calling Primary server via name service");
-        try {
-            // Discover primary/leader via name service
-            String leaderServiceName = server.getPartitionId();
-            NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
 
-            String IPAddress = serviceDetails.getIPAddress();
-            int port = serviceDetails.getPort();
+    /* ---------------- TX CALLBACKS ---------------- */
 
-            System.out.println("Found leader at: " + IPAddress + ":" + port);
-            return callServer(accountId, initialBalance, false, IPAddress, port);
+    @Override
+    public void onGlobalCommit() {
+        updateAccount();
+    }
 
-        } catch (Exception e) {
-            System.err.println("Error discovering or calling primary: " + e.getMessage());
+    @Override
+    public void onGlobalAbort() {
+        tempDataHolder = null;
+        transactionStatus = false;
+        System.out.println("Transaction Aborted by the Coordinator");
+    }
 
-            // Fallback: try using lock data
-            try {
-                String[] currentLeaderData = server.getCurrentLeaderData();
-                if (currentLeaderData != null) {
-                    String IPAddress = currentLeaderData[0];
-                    int port = Integer.parseInt(currentLeaderData[1]);
-                    System.out.println("Using fallback leader from lock: " + IPAddress + ":" + port);
-                    return callServer(accountId, initialBalance, false, IPAddress, port);
-                }
-            } catch (Exception ex) {
-                System.err.println("Fallback also failed: " + ex.getMessage());
-            }
+    /* ---------------- INTERNAL HELPERS ---------------- */
 
-            return CreateAccountResponse.newBuilder()
-                    .setSuccess(false)
-                    .setMessage("Leader not available")
-                    .build();
+    private void updateAccount() {
+        if (tempDataHolder != null) {
+            String accountId = tempDataHolder.accountId;
+            double initialBalance = tempDataHolder.initialBalance;
+            server.createAccount(accountId, initialBalance);
+            System.out.println("Account " + accountId + " created with balance " + initialBalance + " committed");
+            tempDataHolder = null;
+            transactionStatus = true;
         }
     }
 
-    private CreateAccountResponse callServer(String accountId, double initialBalance,
-                                             boolean isSentByPrimary, String IPAddress, int port) {
-        System.out.println("Call Server " + IPAddress + ":" + port);
-        ManagedChannel channel = null;
+    private void startDistributedTx(String accountId, double initialBalance) {
         try {
-            channel = ManagedChannelBuilder
+            server.getTransaction().start(accountId, String.valueOf(UUID.randomUUID()));
+            tempDataHolder = new AccountData(accountId, initialBalance);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void updateSecondaryServers(String accountId, double initialBalance)
+            throws KeeperException, InterruptedException {
+        System.out.println("Updating secondary servers");
+        List<String[]> othersData = server.getOthersData();
+        for (String[] data : othersData) {
+            String IPAddress = data[0];
+            int port = Integer.parseInt(data[1]);
+            callServer(accountId, initialBalance, true, IPAddress, port);
+        }
+    }
+
+    private CreateAccountResponse callPrimary(String accountId, double initialBalance) {
+        System.out.println("Calling Primary server");
+        String[] currentLeaderData = server.getCurrentLeaderData();
+        String IPAddress = currentLeaderData[0];
+        int port = Integer.parseInt(currentLeaderData[1]);
+        return callServer(accountId, initialBalance, false, IPAddress, port);
+    }
+
+    private CreateAccountResponse callServer(String accountId, double initialBalance,
+                                             boolean isSentByPrimary,
+                                             String host, int port) {
+        System.out.println("Call Server " + host + ":" + port);
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(host, port)
+                .usePlaintext()
+                .build();
+
+        AccountServiceGrpc.AccountServiceBlockingStub stub =
+                AccountServiceGrpc.newBlockingStub(channel);
+
+        CreateAccountRequest request = CreateAccountRequest.newBuilder()
+                .setAccountId(accountId)
+                .setInitialBalance(initialBalance)
+                .setIsSentByPrimary(isSentByPrimary)
+                .build();
+
+        CreateAccountResponse response = stub.createAccount(request);
+        channel.shutdown();
+        return response;
+    }
+
+    private GetBalanceResponse callPrimaryGetBalance(String accountId) {
+        try {
+            String[] currentLeaderData = server.getCurrentLeaderData();
+            if (currentLeaderData == null) {
+                throw new RuntimeException("No leader data available");
+            }
+
+            String IPAddress = currentLeaderData[0];
+            int port = Integer.parseInt(currentLeaderData[1]);
+
+            ManagedChannel channel = ManagedChannelBuilder
                     .forAddress(IPAddress, port)
                     .usePlaintext()
                     .build();
@@ -155,39 +225,29 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
             AccountServiceGrpc.AccountServiceBlockingStub stub =
                     AccountServiceGrpc.newBlockingStub(channel);
 
-            CreateAccountRequest request = CreateAccountRequest.newBuilder()
-                    .setAccountId(accountId)
-                    .setInitialBalance(initialBalance)
-                    .setIsSentByPrimary(isSentByPrimary)
-                    .build();
+            GetBalanceResponse response = stub.getBalance(
+                    GetBalanceRequest.newBuilder()
+                            .setAccountId(accountId)
+                            .build()
+            );
 
-            CreateAccountResponse response = stub.createAccount(request);
+            channel.shutdown();
             return response;
-        } finally {
-            if (channel != null) {
-                channel.shutdown();
-            }
+
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
-    private void updateSecondaryServers(String accountId, double initialBalance) {
-        try {
-            System.out.println("Updating secondary servers");
-            List<String[]> othersData = server.getOthersData();
+    /* ---------------- DATA HOLDER CLASS ---------------- */
 
-            for (String[] data : othersData) {
-                String IPAddress = data[0];
-                int port = Integer.parseInt(data[1]);
+    private static class AccountData {
+        String accountId;
+        double initialBalance;
 
-                try {
-                    callServer(accountId, initialBalance, true, IPAddress, port);
-                    System.out.println("Successfully replicated to " + IPAddress + ":" + port);
-                } catch (Exception e) {
-                    System.err.println("Failed to replicate to " + IPAddress + ":" + port);
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Error during replication: " + e.getMessage());
+        AccountData(String accountId, double initialBalance) {
+            this.accountId = accountId;
+            this.initialBalance = initialBalance;
         }
     }
 }
