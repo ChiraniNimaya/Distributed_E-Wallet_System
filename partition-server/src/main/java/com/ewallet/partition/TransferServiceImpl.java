@@ -1,17 +1,27 @@
 package com.ewallet.partition;
 
+import com.ewallet.lock.*;
 import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.stub.StreamObserver;
+import org.apache.zookeeper.KeeperException;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
 
-public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImplBase {
+public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImplBase
+        implements DistributedTxListener {
+
     private final PartitionServer server;
     private static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
+
+    // Transaction state holders
+    private TransferData tempTransferData;
+    private boolean transactionStatus = false;
+    private String failureReason = "";
 
     public TransferServiceImpl(PartitionServer server) {
         this.server = server;
@@ -27,97 +37,130 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
 
         System.out.println("Transfer request: " + fromAccount + " -> " + toAccount + ", amount=" + amount);
 
-        TransferResponse response;
-
         if (server.isLeader()) {
             // Act as primary
-            boolean fromInThisPartition = server.hasAccount(fromAccount);
-            boolean toInThisPartition = server.hasAccount(toAccount);
+            try {
+                boolean fromInThisPartition = server.hasAccount(fromAccount);
+                boolean toInThisPartition = server.hasAccount(toAccount);
 
-            if (fromInThisPartition && toInThisPartition) {
-                // Within-partition transfer
-                response = handleWithinPartitionTransfer(fromAccount, toAccount, amount, transactionId);
-            } else {
-                // Cross-partition transfer - use 2PC
-                response = handleCrossPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+                if (fromInThisPartition && toInThisPartition) {
+                    // Within-partition transfer using distributed transaction
+                    System.out.println("Within-partition transfer as Primary");
+
+                    // PRE-VALIDATION: Check before starting distributed transaction
+                    String validationError = validateTransfer(fromAccount, toAccount, amount);
+                    if (validationError != null) {
+                        System.out.println("Transfer validation failed: " + validationError);
+                        failureReason = validationError;
+                        transactionStatus = false;
+
+                        TransferResponse response = TransferResponse.newBuilder()
+                                .setSuccess(false)
+                                .setMessage(validationError)
+                                .setTransactionId(transactionId)
+                                .build();
+
+                        responseObserver.onNext(response);
+                        responseObserver.onCompleted();
+                        return;
+                    }
+
+                    DistributedTxCoordinator txCoordinator = new DistributedTxCoordinator(this);
+                    startDistributedTxForTransfer(txCoordinator, fromAccount, toAccount, amount, transactionId);
+                    updateSecondaryServersForTransfer(fromAccount, toAccount, amount, transactionId);
+                    System.out.println("Going to perform transfer transaction");
+                    txCoordinator.perform();
+                } else {
+                    // Cross-partition transfer - use 2PC (traditional approach)
+                    TwoPhaseCommitCoordinator coordinator = new TwoPhaseCommitCoordinator(server);
+                    TransferResponse crossPartitionResponse = coordinator.executeTransfer(
+                            fromAccount, toAccount, amount, transactionId);
+
+                    responseObserver.onNext(crossPartitionResponse);
+                    responseObserver.onCompleted();
+                    return;
+                }
+            } catch (Exception e) {
+                System.out.println("Error while processing transfer: " + e.getMessage());
+                e.printStackTrace();
             }
         } else {
             // Act as secondary
             if (request.getIsSentByPrimary()) {
                 System.out.println("Processing transfer on secondary, on Primary's command");
+                DistributedTxParticipant txParticipant = new DistributedTxParticipant(this);
+                startDistributedTxForTransfer(txParticipant, fromAccount, toAccount, amount, transactionId);
+
+                // Validate the transfer
                 boolean fromInThisPartition = server.hasAccount(fromAccount);
                 boolean toInThisPartition = server.hasAccount(toAccount);
 
                 if (fromInThisPartition && toInThisPartition) {
-                    response = handleWithinPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+                    String validationError = validateTransfer(fromAccount, toAccount, amount);
+
+                    if (validationError == null) {
+                        System.out.println("Secondary validation passed - voting COMMIT");
+                        txParticipant.voteCommit();
+                    } else {
+                        System.out.println("Secondary validation failed: " + validationError + " - voting ABORT");
+                        txParticipant.voteAbort();
+                    }
                 } else {
-                    response = handleCrossPartitionTransfer(fromAccount, toAccount, amount, transactionId);
+                    // Cross-partition on secondary - shouldn't happen normally
+                    txParticipant.voteAbort();
                 }
             } else {
                 // Forward to primary
-                System.out.println("Not leader, forwarding to primary...");
-                response = callPrimary(fromAccount, toAccount, amount, transactionId);
+                System.out.println("Not leader, forwarding transfer to primary...");
+                TransferResponse response = callPrimary(fromAccount, toAccount, amount, transactionId);
+                if (response.getSuccess()) {
+                    transactionStatus = true;
+                }
+
+                responseObserver.onNext(response);
+                responseObserver.onCompleted();
+                return;
             }
         }
+
+        TransferResponse response = TransferResponse.newBuilder()
+                .setSuccess(transactionStatus)
+                .setMessage(transactionStatus ? "Transfer completed" :
+                        (failureReason.isEmpty() ? "Transfer failed" : failureReason))
+                .setTransactionId(transactionId)
+                .build();
 
         responseObserver.onNext(response);
         responseObserver.onCompleted();
     }
 
-    private TransferResponse handleWithinPartitionTransfer(String fromAccount, String toAccount,
-                                                           double amount, String transactionId) {
-        System.out.println("Within-partition transfer: " + transactionId);
-
-        // Prepare phase
-        boolean debitPrepared = server.prepareDebit(transactionId, fromAccount, amount);
-        if (!debitPrepared) {
-            return TransferResponse.newBuilder()
-                    .setSuccess(false)
-                    .setMessage("Insufficient balance")
-                    .setTransactionId(transactionId)
-                    .build();
+    private String validateTransfer(String fromAccount, String toAccount, double amount) {
+        // Check if source account exists
+        if (!server.hasAccount(fromAccount)) {
+            return "Source account not found: " + fromAccount;
         }
 
-        boolean creditPrepared = server.prepareCredit(transactionId + "_credit", toAccount, amount);
-        if (!creditPrepared) {
-            server.abortTransaction(transactionId);
-            return TransferResponse.newBuilder()
-                    .setSuccess(false)
-                    .setMessage("Target account not found")
-                    .setTransactionId(transactionId)
-                    .build();
+        // Check if destination account exists
+        if (!server.hasAccount(toAccount)) {
+            return "Destination account not found: " + toAccount;
         }
 
-        // Commit phase
-        boolean debitCommitted = server.commitTransaction(transactionId);
-        boolean creditCommitted = server.commitTransaction(transactionId + "_credit");
-
-        if (debitCommitted && creditCommitted) {
-            // Replicate to secondaries if this is the leader
-            if (server.isLeader()) {
-                replicateTransferToSecondaries(fromAccount, toAccount, amount, transactionId);
-            }
-
-            return TransferResponse.newBuilder()
-                    .setSuccess(true)
-                    .setMessage("Transfer completed successfully")
-                    .setTransactionId(transactionId)
-                    .build();
-        } else {
-            return TransferResponse.newBuilder()
-                    .setSuccess(false)
-                    .setMessage("Transfer commit failed")
-                    .setTransactionId(transactionId)
-                    .build();
+        // Check balance
+        Double fromBalance = server.getBalance(fromAccount);
+        if (fromBalance == null) {
+            return "Unable to retrieve balance for account: " + fromAccount;
         }
-    }
 
-    private TransferResponse handleCrossPartitionTransfer(String fromAccount, String toAccount,
-                                                          double amount, String transactionId) {
-        System.out.println("Cross-partition transfer: " + transactionId);
+        if (fromBalance < amount) {
+            return "Insufficient balance. Current balance: " + fromBalance + ", Required: " + amount;
+        }
 
-        TwoPhaseCommitCoordinator coordinator = new TwoPhaseCommitCoordinator(server);
-        return coordinator.executeTransfer(fromAccount, toAccount, amount, transactionId);
+        // Check for valid amount
+        if (amount <= 0) {
+            return "Invalid transfer amount: " + amount;
+        }
+
+        return null; // Valid
     }
 
     @Override
@@ -136,11 +179,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
             canCommit = server.prepareCredit(transactionId, accountId, amount);
         }
 
-        // IMPORTANT: Replicate prepare to secondaries if this is the leader
-        if (canCommit && server.isLeader()) {
-            replicatePrepareToSecondaries(transactionId, accountId, amount, operation);
-        }
-
         PrepareResponse response = PrepareResponse.newBuilder()
                 .setCanCommit(canCommit)
                 .setTransactionId(transactionId)
@@ -157,11 +195,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
 
         boolean success = server.commitTransaction(transactionId);
 
-        // IMPORTANT: Replicate commit to secondaries if this is the leader
-        if (success && server.isLeader()) {
-            replicateCommitToSecondaries(transactionId);
-        }
-
         CommitResponse response = CommitResponse.newBuilder()
                 .setSuccess(success)
                 .build();
@@ -177,11 +210,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
 
         boolean success = server.abortTransaction(transactionId);
 
-        // IMPORTANT: Replicate abort to secondaries if this is the leader
-        if (success && server.isLeader()) {
-            replicateAbortToSecondaries(transactionId);
-        }
-
         AbortResponse response = AbortResponse.newBuilder()
                 .setSuccess(success)
                 .build();
@@ -190,41 +218,92 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         responseObserver.onCompleted();
     }
 
-    private TransferResponse callPrimary(String fromAccount, String toAccount, double amount, String transactionId) {
-        System.out.println("Calling Primary server via name service");
-        try {
-            // Discover primary/leader via name service
-            String leaderServiceName = server.getPartitionId();
-            NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-            NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(leaderServiceName);
+    /* ---------------- TX CALLBACKS ---------------- */
 
-            String IPAddress = serviceDetails.getIPAddress();
-            int port = serviceDetails.getPort();
+    @Override
+    public void onGlobalCommit() {
+        executeTransfer();
+    }
 
-            System.out.println("Found leader at: " + IPAddress + ":" + port);
-            return callServer(fromAccount, toAccount, amount, transactionId, false, IPAddress, port);
+    @Override
+    public void onGlobalAbort() {
+        tempTransferData = null;
+        transactionStatus = false;
+        System.out.println("Transfer Transaction Aborted by the Coordinator");
+    }
 
-        } catch (Exception e) {
-            System.err.println("Error discovering or calling primary: " + e.getMessage());
+    /* ---------------- INTERNAL HELPERS ---------------- */
 
-            // Fallback: try using lock data
-            try {
-                String[] currentLeaderData = server.getCurrentLeaderData();
-                if (currentLeaderData != null) {
-                    String IPAddress = currentLeaderData[0];
-                    int port = Integer.parseInt(currentLeaderData[1]);
-                    System.out.println("Using fallback leader from lock: " + IPAddress + ":" + port);
-                    return callServer(fromAccount, toAccount, amount, transactionId, false, IPAddress, port);
-                }
-            } catch (Exception ex) {
-                System.err.println("Fallback also failed: " + ex.getMessage());
+    private void executeTransfer() {
+        if (tempTransferData != null) {
+            String fromAccount = tempTransferData.fromAccount;
+            String toAccount = tempTransferData.toAccount;
+            double amount = tempTransferData.amount;
+            String transactionId = tempTransferData.transactionId;
+
+            // Execute the actual transfer
+            boolean debitPrepared = server.prepareDebit(transactionId, fromAccount, amount);
+            if (!debitPrepared) {
+                System.out.println("Transfer failed: Insufficient balance");
+                tempTransferData = null;
+                transactionStatus = false;
+                return;
             }
 
-            return TransferResponse.newBuilder()
-                    .setSuccess(false)
-                    .setMessage("Leader not available")
-                    .build();
+            boolean creditPrepared = server.prepareCredit(transactionId + "_credit", toAccount, amount);
+            if (!creditPrepared) {
+                server.abortTransaction(transactionId);
+                System.out.println("Transfer failed: Target account not found");
+                tempTransferData = null;
+                transactionStatus = false;
+                return;
+            }
+
+            boolean debitCommitted = server.commitTransaction(transactionId);
+            boolean creditCommitted = server.commitTransaction(transactionId + "_credit");
+
+            if (debitCommitted && creditCommitted) {
+                System.out.println("Transfer from " + fromAccount + " to " + toAccount +
+                        " amount " + amount + " committed");
+                transactionStatus = true;
+            } else {
+                System.out.println("Transfer commit failed");
+                transactionStatus = false;
+            }
+
+            tempTransferData = null;
         }
+    }
+
+    private void startDistributedTxForTransfer(DistributedTx tx, String fromAccount, String toAccount,
+                                               double amount, String transactionId) {
+        try {
+            tx.start(transactionId, String.valueOf(UUID.randomUUID()));
+            tempTransferData = new TransferData(fromAccount, toAccount, amount, transactionId);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void updateSecondaryServersForTransfer(String fromAccount, String toAccount,
+                                                   double amount, String transactionId)
+            throws KeeperException, InterruptedException {
+        System.out.println("Updating secondary servers for transfer");
+        List<String[]> othersData = server.getOthersData();
+        for (String[] data : othersData) {
+            String IPAddress = data[0];
+            int port = Integer.parseInt(data[1]);
+            callServer(fromAccount, toAccount, amount, transactionId, true, IPAddress, port);
+        }
+    }
+
+    private TransferResponse callPrimary(String fromAccount, String toAccount,
+                                         double amount, String transactionId) {
+        System.out.println("Calling Primary server");
+        String[] currentLeaderData = server.getCurrentLeaderData();
+        String IPAddress = currentLeaderData[0];
+        int port = Integer.parseInt(currentLeaderData[1]);
+        return callServer(fromAccount, toAccount, amount, transactionId, false, IPAddress, port);
     }
 
     private TransferResponse callServer(String fromAccount, String toAccount, double amount,
@@ -258,164 +337,19 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         }
     }
 
-    private void replicateTransferToSecondaries(String fromAccount, String toAccount,
-                                                double amount, String transactionId) {
-        try {
-            System.out.println("Replicating transfer to secondary servers");
-            List<String[]> othersData = server.getOthersData();
+    /* ---------------- DATA HOLDER CLASS ---------------- */
 
-            for (String[] data : othersData) {
-                String IPAddress = data[0];
-                int port = Integer.parseInt(data[1]);
+    private static class TransferData {
+        String fromAccount;
+        String toAccount;
+        double amount;
+        String transactionId;
 
-                try {
-                    callServer(fromAccount, toAccount, amount, transactionId, true, IPAddress, port);
-                    System.out.println("Successfully replicated to " + IPAddress + ":" + port);
-                } catch (Exception e) {
-                    System.err.println("Failed to replicate to " + IPAddress + ":" + port);
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Error during replication: " + e.getMessage());
-        }
-    }
-
-    // NEW: Replicate prepare operation to secondaries
-    private void replicatePrepareToSecondaries(String transactionId, String accountId,
-                                               double amount, String operation) {
-        try {
-            System.out.println("Replicating prepare to secondary servers");
-            List<String[]> othersData = server.getOthersData();
-
-            for (String[] data : othersData) {
-                String IPAddress = data[0];
-                int port = Integer.parseInt(data[1]);
-
-                ManagedChannel channel = null;
-                try {
-                    channel = ManagedChannelBuilder
-                            .forAddress(IPAddress, port)
-                            .usePlaintext()
-                            .build();
-
-                    TransferServiceGrpc.TransferServiceBlockingStub stub =
-                            TransferServiceGrpc.newBlockingStub(channel);
-
-                    PrepareRequest request = PrepareRequest.newBuilder()
-                            .setTransactionId(transactionId)
-                            .setAccountId(accountId)
-                            .setAmount(amount)
-                            .setOperation(operation)
-                            .build();
-
-                    PrepareResponse response = stub.prepare(request);
-
-                    if (response.getCanCommit()) {
-                        System.out.println("Successfully replicated prepare to " + IPAddress + ":" + port);
-                    } else {
-                        System.err.println("Secondary prepare failed: " + IPAddress + ":" + port);
-                    }
-
-                } catch (Exception e) {
-                    System.err.println("Failed to replicate prepare to " + IPAddress + ":" + port + " - " + e.getMessage());
-                } finally {
-                    if (channel != null) {
-                        channel.shutdown();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Error during prepare replication: " + e.getMessage());
-        }
-    }
-
-    // NEW: Replicate commit operation to secondaries
-    private void replicateCommitToSecondaries(String transactionId) {
-        try {
-            System.out.println("Replicating commit to secondary servers");
-            List<String[]> othersData = server.getOthersData();
-
-            for (String[] data : othersData) {
-                String IPAddress = data[0];
-                int port = Integer.parseInt(data[1]);
-
-                ManagedChannel channel = null;
-                try {
-                    channel = ManagedChannelBuilder
-                            .forAddress(IPAddress, port)
-                            .usePlaintext()
-                            .build();
-
-                    TransferServiceGrpc.TransferServiceBlockingStub stub =
-                            TransferServiceGrpc.newBlockingStub(channel);
-
-                    CommitRequest request = CommitRequest.newBuilder()
-                            .setTransactionId(transactionId)
-                            .build();
-
-                    CommitResponse response = stub.commit(request);
-
-                    if (response.getSuccess()) {
-                        System.out.println("Successfully replicated commit to " + IPAddress + ":" + port);
-                    } else {
-                        System.err.println("Secondary commit failed: " + IPAddress + ":" + port);
-                    }
-
-                } catch (Exception e) {
-                    System.err.println("Failed to replicate commit to " + IPAddress + ":" + port + " - " + e.getMessage());
-                } finally {
-                    if (channel != null) {
-                        channel.shutdown();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Error during commit replication: " + e.getMessage());
-        }
-    }
-
-    // NEW: Replicate abort operation to secondaries
-    private void replicateAbortToSecondaries(String transactionId) {
-        try {
-            System.out.println("Replicating abort to secondary servers");
-            List<String[]> othersData = server.getOthersData();
-
-            for (String[] data : othersData) {
-                String IPAddress = data[0];
-                int port = Integer.parseInt(data[1]);
-
-                ManagedChannel channel = null;
-                try {
-                    channel = ManagedChannelBuilder
-                            .forAddress(IPAddress, port)
-                            .usePlaintext()
-                            .build();
-
-                    TransferServiceGrpc.TransferServiceBlockingStub stub =
-                            TransferServiceGrpc.newBlockingStub(channel);
-
-                    AbortRequest request = AbortRequest.newBuilder()
-                            .setTransactionId(transactionId)
-                            .build();
-
-                    AbortResponse response = stub.abort(request);
-
-                    if (response.getSuccess()) {
-                        System.out.println("Successfully replicated abort to " + IPAddress + ":" + port);
-                    } else {
-                        System.err.println("Secondary abort failed: " + IPAddress + ":" + port);
-                    }
-
-                } catch (Exception e) {
-                    System.err.println("Failed to replicate abort to " + IPAddress + ":" + port + " - " + e.getMessage());
-                } finally {
-                    if (channel != null) {
-                        channel.shutdown();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Error during abort replication: " + e.getMessage());
+        TransferData(String fromAccount, String toAccount, double amount, String transactionId) {
+            this.fromAccount = fromAccount;
+            this.toAccount = toAccount;
+            this.amount = amount;
+            this.transactionId = transactionId;
         }
     }
 }

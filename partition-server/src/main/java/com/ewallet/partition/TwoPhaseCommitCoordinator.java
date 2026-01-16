@@ -5,6 +5,8 @@ import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
+import java.util.List;
+
 public class TwoPhaseCommitCoordinator {
     private final PartitionServer server;
 
@@ -24,7 +26,8 @@ public class TwoPhaseCommitCoordinator {
         // ===== PHASE 1: PREPARE =====
         System.out.println("Phase 1: PREPARE");
 
-        // Prepare DEBIT on source partition (leader will replicate to its secondaries)
+        // Prepare DEBIT on source partition
+        // The leader of that partition will handle replication to its secondaries
         boolean fromPrepared = prepareParticipant(
                 fromPartitionId, transactionId, fromAccount, amount, "DEBIT");
 
@@ -37,13 +40,14 @@ public class TwoPhaseCommitCoordinator {
                     .build();
         }
 
-        // Prepare CREDIT on destination partition (leader will replicate to its secondaries)
+        // Prepare CREDIT on destination partition
+        // The leader of that partition will handle replication to its secondaries
         boolean toPrepared = prepareParticipant(
                 toPartitionId, transactionId + "_credit", toAccount, amount, "CREDIT");
 
         if (!toPrepared) {
             System.out.println("Prepare failed for credit on " + toPartitionId);
-            // Abort the debit preparation (leader will replicate abort to its secondaries)
+            // Abort the debit preparation
             abortParticipant(fromPartitionId, transactionId);
             return TransferResponse.newBuilder()
                     .setSuccess(false)
@@ -55,14 +59,16 @@ public class TwoPhaseCommitCoordinator {
         // ===== PHASE 2: COMMIT =====
         System.out.println("Phase 2: COMMIT");
 
-        // Commit DEBIT on source partition (leader will replicate to its secondaries)
+        // Commit DEBIT on source partition
+        // The leader will handle replication to its secondaries
         boolean fromCommitted = commitParticipant(fromPartitionId, transactionId);
 
-        // Commit CREDIT on destination partition (leader will replicate to its secondaries)
+        // Commit CREDIT on destination partition
+        // The leader will handle replication to its secondaries
         boolean toCommitted = commitParticipant(toPartitionId, transactionId + "_credit");
 
         if (fromCommitted && toCommitted) {
-            System.out.println("2PC completed successfully - all replicas updated");
+            System.out.println("2PC completed successfully - all partitions and replicas updated");
             return TransferResponse.newBuilder()
                     .setSuccess(true)
                     .setMessage("Cross-partition transfer completed successfully")
@@ -70,7 +76,7 @@ public class TwoPhaseCommitCoordinator {
                     .build();
         } else {
             System.out.println("2PC commit failed");
-            // Attempt to abort both (leaders will replicate aborts to their secondaries)
+            // Attempt to abort both
             abortParticipant(fromPartitionId, transactionId);
             abortParticipant(toPartitionId, transactionId + "_credit");
             return TransferResponse.newBuilder()
@@ -98,63 +104,66 @@ public class TwoPhaseCommitCoordinator {
     private boolean prepareParticipant(String partitionId, String transactionId,
                                        String accountId, double amount, String operation) {
         if (partitionId.equals(server.getPartitionId())) {
-            // Local partition - prepare locally (will replicate if leader)
+            // Local partition - prepare locally
+            boolean canCommit;
             if ("DEBIT".equals(operation)) {
-                boolean canCommit = server.prepareDebit(transactionId, accountId, amount);
-                // If this is the leader and prepare succeeded, replicate to secondaries
-                // This is now handled in TransferServiceImpl.prepare() when called via gRPC
-                // For direct local calls, we need to handle it here
-                if (canCommit && server.isLeader()) {
-                    replicatePrepareToLocalSecondaries(transactionId, accountId, amount, operation);
-                }
-                return canCommit;
+                canCommit = server.prepareDebit(transactionId, accountId, amount);
             } else {
-                boolean canCommit = server.prepareCredit(transactionId, accountId, amount);
-                if (canCommit && server.isLeader()) {
-                    replicatePrepareToLocalSecondaries(transactionId, accountId, amount, operation);
-                }
-                return canCommit;
+                canCommit = server.prepareCredit(transactionId, accountId, amount);
             }
+
+            // If this is the leader and prepare succeeded, replicate to local secondaries
+            if (canCommit && server.isLeader()) {
+                replicatePrepareToLocalSecondaries(transactionId, accountId, amount, operation);
+            }
+            return canCommit;
         } else {
-            // Remote partition - ask remote leader to prepare (leader will handle replication)
+            // Remote partition - contact the leader, which will handle its own replication
             return prepareRemoteParticipant(partitionId, transactionId, accountId, amount, operation);
         }
     }
 
     private boolean commitParticipant(String partitionId, String transactionId) {
         if (partitionId.equals(server.getPartitionId())) {
-            // Local partition - commit locally (will replicate if leader)
+            // Local partition - commit locally
             boolean success = server.commitTransaction(transactionId);
+
+            // If this is the leader and commit succeeded, replicate to local secondaries
             if (success && server.isLeader()) {
                 replicateCommitToLocalSecondaries(transactionId);
             }
             return success;
         } else {
-            // Remote partition - ask remote leader to commit (leader will handle replication)
+            // Remote partition - contact the leader, which will handle its own replication
             return commitRemoteParticipant(partitionId, transactionId);
         }
     }
 
     private boolean abortParticipant(String partitionId, String transactionId) {
         if (partitionId.equals(server.getPartitionId())) {
-            // Local partition - abort locally (will replicate if leader)
+            // Local partition - abort locally
             boolean success = server.abortTransaction(transactionId);
+
+            // If this is the leader and abort succeeded, replicate to local secondaries
             if (success && server.isLeader()) {
                 replicateAbortToLocalSecondaries(transactionId);
             }
             return success;
         } else {
-            // Remote partition - ask remote leader to abort (leader will handle replication)
+            // Remote partition - contact the leader, which will handle its own replication
             return abortRemoteParticipant(partitionId, transactionId);
         }
     }
 
-    // Helper methods for local replication
+    /* ---------------- LOCAL REPLICATION HELPERS ---------------- */
+
     private void replicatePrepareToLocalSecondaries(String transactionId, String accountId,
                                                     double amount, String operation) {
         try {
             System.out.println("Replicating prepare to local secondaries");
-            for (String[] replica : server.getOthersData()) {
+            List<String[]> othersData = server.getOthersData();
+
+            for (String[] replica : othersData) {
                 String host = replica[0];
                 int port = Integer.parseInt(replica[1]);
 
@@ -175,11 +184,16 @@ public class TwoPhaseCommitCoordinator {
                             .setOperation(operation)
                             .build();
 
-                    stub.prepare(request);
-                    System.out.println("Replicated prepare to secondary: " + host + ":" + port);
+                    PrepareResponse response = stub.prepare(request);
+
+                    if (response.getCanCommit()) {
+                        System.out.println("Replicated prepare to secondary: " + host + ":" + port);
+                    } else {
+                        System.err.println("Secondary prepare failed: " + host + ":" + port);
+                    }
 
                 } catch (Exception e) {
-                    System.err.println("Error replicating prepare to " + host + ":" + port);
+                    System.err.println("Error replicating prepare to " + host + ":" + port + " - " + e.getMessage());
                 } finally {
                     if (channel != null) {
                         channel.shutdown();
@@ -194,7 +208,9 @@ public class TwoPhaseCommitCoordinator {
     private void replicateCommitToLocalSecondaries(String transactionId) {
         try {
             System.out.println("Replicating commit to local secondaries");
-            for (String[] replica : server.getOthersData()) {
+            List<String[]> othersData = server.getOthersData();
+
+            for (String[] replica : othersData) {
                 String host = replica[0];
                 int port = Integer.parseInt(replica[1]);
 
@@ -212,11 +228,16 @@ public class TwoPhaseCommitCoordinator {
                             .setTransactionId(transactionId)
                             .build();
 
-                    stub.commit(request);
-                    System.out.println("Replicated commit to secondary: " + host + ":" + port);
+                    CommitResponse response = stub.commit(request);
+
+                    if (response.getSuccess()) {
+                        System.out.println("Replicated commit to secondary: " + host + ":" + port);
+                    } else {
+                        System.err.println("Secondary commit failed: " + host + ":" + port);
+                    }
 
                 } catch (Exception e) {
-                    System.err.println("Error replicating commit to " + host + ":" + port);
+                    System.err.println("Error replicating commit to " + host + ":" + port + " - " + e.getMessage());
                 } finally {
                     if (channel != null) {
                         channel.shutdown();
@@ -231,7 +252,9 @@ public class TwoPhaseCommitCoordinator {
     private void replicateAbortToLocalSecondaries(String transactionId) {
         try {
             System.out.println("Replicating abort to local secondaries");
-            for (String[] replica : server.getOthersData()) {
+            List<String[]> othersData = server.getOthersData();
+
+            for (String[] replica : othersData) {
                 String host = replica[0];
                 int port = Integer.parseInt(replica[1]);
 
@@ -249,11 +272,16 @@ public class TwoPhaseCommitCoordinator {
                             .setTransactionId(transactionId)
                             .build();
 
-                    stub.abort(request);
-                    System.out.println("Replicated abort to secondary: " + host + ":" + port);
+                    AbortResponse response = stub.abort(request);
+
+                    if (response.getSuccess()) {
+                        System.out.println("Replicated abort to secondary: " + host + ":" + port);
+                    } else {
+                        System.err.println("Secondary abort failed: " + host + ":" + port);
+                    }
 
                 } catch (Exception e) {
-                    System.err.println("Error replicating abort to " + host + ":" + port);
+                    System.err.println("Error replicating abort to " + host + ":" + port + " - " + e.getMessage());
                 } finally {
                     if (channel != null) {
                         channel.shutdown();
@@ -265,12 +293,13 @@ public class TwoPhaseCommitCoordinator {
         }
     }
 
-    // Remote participant operations (leader will handle its own replication)
+    /* ---------------- REMOTE PARTICIPANT OPERATIONS ---------------- */
+
     private boolean prepareRemoteParticipant(String partitionId, String transactionId,
                                              String accountId, double amount, String operation) {
         ManagedChannel channel = null;
         try {
-            // Find leader via name service (registered as just partitionId)
+            // Find leader via name service
             NameServiceClient nsClient = new NameServiceClient(PartitionServer.NAME_SERVICE_ADDRESS);
             NameServiceClient.ServiceDetails serviceDetails = nsClient.findService(partitionId);
 
