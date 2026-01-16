@@ -52,6 +52,7 @@ message PrepareRequest {
     string accountId = 2;
     double amount = 3;
     string operation = 4; // DEBIT or CREDIT
+    bool isSentByPrimary = 5;
 }
 
 message PrepareResponse {
@@ -61,6 +62,7 @@ message PrepareResponse {
 
 message CommitRequest {
     string transactionId = 1;
+    bool isSentByPrimary = 2;
 }
 
 message CommitResponse {
@@ -69,6 +71,7 @@ message CommitResponse {
 
 message AbortRequest {
     string transactionId = 1;
+    bool isSentByPrimary = 2;
 }
 
 message AbortResponse {
