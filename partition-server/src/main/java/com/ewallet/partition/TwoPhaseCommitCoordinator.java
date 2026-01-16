@@ -1,11 +1,14 @@
 package com.ewallet.partition;
 
+import com.ewallet.PartitionResolver.PartitionResolver;
 import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
 import java.util.List;
+
+import static com.ewallet.partition.PartitionServer.NUM_PARTITIONS;
 
 public class TwoPhaseCommitCoordinator {
     private final PartitionServer server;
@@ -18,8 +21,8 @@ public class TwoPhaseCommitCoordinator {
                                             double amount, String transactionId) {
         System.out.println("Starting 2PC for cross-partition transaction: " + transactionId);
 
-        String fromPartitionId = determinePartition(fromAccount);
-        String toPartitionId = determinePartition(toAccount);
+        String fromPartitionId = PartitionResolver.resolve(fromAccount, NUM_PARTITIONS);
+        String toPartitionId = PartitionResolver.resolve(toAccount, NUM_PARTITIONS);
 
         System.out.println("From partition: " + fromPartitionId + ", To partition: " + toPartitionId);
 
@@ -120,20 +123,6 @@ public class TwoPhaseCommitCoordinator {
         }
 
         return null; // Valid
-    }
-
-    private String determinePartition(String accountId) {
-        String significantPart = accountId;
-        if (accountId.contains("_")) {
-            significantPart = accountId.substring(accountId.lastIndexOf("_") + 1);
-        }
-
-        char firstChar = significantPart.toUpperCase().charAt(0);
-        if (firstChar >= 'A' && firstChar <= 'M') {
-            return "PARTITION_0";
-        } else {
-            return "PARTITION_1";
-        }
     }
 
     private PrepareResult prepareParticipantWithDetails(String partitionId, String transactionId,

@@ -1,22 +1,21 @@
 package com.ewallet.client;
 
+import com.ewallet.PartitionResolver.PartitionResolver;
 import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.StatusRuntimeException;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Scanner;
 import java.util.concurrent.TimeUnit;
 
 public class EWalletClient {
     private static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
     private Scanner scanner = new Scanner(System.in);
+    public static final int NUM_PARTITIONS = 2;
 
     public static void main(String[] args) {
-        String role = "client"; // default role
+        String role = "client";
 
         if (args.length > 0) {
             role = args[0].toLowerCase();
@@ -86,8 +85,18 @@ public class EWalletClient {
     }
 
     private void createAccount() {
-        System.out.print("Enter account ID: ");
-        String accountId = scanner.nextLine().trim();
+        String accountId;
+        while (true) {
+            System.out.print("Enter account ID (numbers only): ");
+            accountId = scanner.nextLine().trim();
+
+            if (accountId.matches("\\d+")) {
+                break;
+            }
+
+            System.out.println("Invalid account ID. Please enter numeric digits only.");
+        }
+
 
         System.out.print("Enter initial balance: ");
         double balance;
@@ -98,19 +107,15 @@ public class EWalletClient {
             return;
         }
 
-        String partitionId = determinePartition(accountId);
+        String partitionId = PartitionResolver.resolve(accountId, NUM_PARTITIONS);
         System.out.println("Account will be created in partition: " + partitionId);
 
         ManagedChannel channel = null;
         try {
-            // Discover leader via name service (registered as partitionId only)
             NameServiceClient nsClient = new NameServiceClient(NAME_SERVICE_ADDRESS);
-
             NameServiceClient.ServiceDetails serviceDetails;
             try {
                 serviceDetails = nsClient.findService(partitionId);
-                System.out.println("Found leader via name service: " +
-                        serviceDetails.getIPAddress() + ":" + serviceDetails.getPort());
             } catch (Exception e) {
                 System.out.println("Failed to find partition leader!");
                 System.out.println("  Partition: " + partitionId);
@@ -161,7 +166,7 @@ public class EWalletClient {
         System.out.print("Enter account ID: ");
         String accountId = scanner.nextLine().trim();
 
-        String partitionId = determinePartition(accountId);
+        String partitionId = PartitionResolver.resolve(accountId, NUM_PARTITIONS);
         System.out.println("Checking in partition: " + partitionId);
 
         ManagedChannel channel = null;
@@ -224,8 +229,8 @@ public class EWalletClient {
             return;
         }
 
-        String fromPartitionId = determinePartition(fromAccount);
-        String toPartitionId = determinePartition(toAccount);
+        String fromPartitionId = PartitionResolver.resolve(fromAccount, NUM_PARTITIONS);
+        String toPartitionId = PartitionResolver.resolve(toAccount, NUM_PARTITIONS);
 
         System.out.println("Transfer route: " + fromPartitionId + " to " + toPartitionId);
 
@@ -276,20 +281,6 @@ public class EWalletClient {
                     channel.shutdownNow();
                 }
             }
-        }
-    }
-
-    private String determinePartition(String accountId) {
-        String significantPart = accountId;
-        if (accountId.contains("_")) {
-            significantPart = accountId.substring(accountId.lastIndexOf("_") + 1);
-        }
-
-        char firstChar = significantPart.toUpperCase().charAt(0);
-        if (firstChar >= 'A' && firstChar <= 'M') {
-            return "PARTITION_0";
-        } else {
-            return "PARTITION_1";
         }
     }
 }
