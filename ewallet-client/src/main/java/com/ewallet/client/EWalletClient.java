@@ -163,8 +163,17 @@ public class EWalletClient {
     }
 
     private void checkBalance() {
-        System.out.print("Enter account ID: ");
-        String accountId = scanner.nextLine().trim();
+        String accountId;
+        while (true) {
+            System.out.print("Enter account ID (numbers only): ");
+            accountId = scanner.nextLine().trim();
+
+            if (accountId.matches("\\d+")) {
+                break;
+            }
+
+            System.out.println("Invalid account ID. Please enter numeric digits only.");
+        }
 
         String partitionId = PartitionResolver.resolve(accountId, NUM_PARTITIONS);
         System.out.println("Checking in partition: " + partitionId);
@@ -214,11 +223,29 @@ public class EWalletClient {
     }
 
     private void transferMoney() {
-        System.out.print("Enter source account ID: ");
-        String fromAccount = scanner.nextLine().trim();
+        String fromAccount;
+        while (true) {
+            System.out.print("Enter source account ID (numbers only): ");
+            fromAccount = scanner.nextLine().trim();
 
-        System.out.print("Enter destination account ID: ");
-        String toAccount = scanner.nextLine().trim();
+            if (fromAccount.matches("\\d+")) {
+                break;
+            }
+
+            System.out.println("Invalid account ID. Please enter numeric digits only.");
+        }
+
+        String toAccount;
+        while (true) {
+            System.out.print("Enter destination account ID (numbers only): ");
+            toAccount = scanner.nextLine().trim();
+
+            if (toAccount.matches("\\d+")) {
+                break;
+            }
+
+            System.out.println("Invalid account ID. Please enter numeric digits only.");
+        }
 
         System.out.print("Enter amount to transfer: ");
         double amount;

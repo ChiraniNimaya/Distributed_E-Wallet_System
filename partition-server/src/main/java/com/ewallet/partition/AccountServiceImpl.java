@@ -1,6 +1,5 @@
 package com.ewallet.partition;
 
-import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -45,7 +44,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
             }
         } else {
             if (request.getIsSentByPrimary()) {
-                // Request from primary - participate in distributed transaction
                 System.out.println("Creating account on secondary, on Primary's command");
                 startDistributedTx(accountId, initialBalance);
 
@@ -56,7 +54,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
                     ((DistributedTxParticipant) server.getTransaction()).voteAbort();
                 }
             } else {
-                // Request from client - forward to primary
                 CreateAccountResponse response = callPrimary(accountId, initialBalance);
                 if (response.getSuccess()) {
                     transactionStatus = true;
@@ -83,7 +80,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
 
         Double balance = server.getBalance(accountId);
 
-        // Found locally → return immediately
         if (balance != null) {
             responseObserver.onNext(
                     GetBalanceResponse.newBuilder()
@@ -96,7 +92,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
             return;
         }
 
-        // If leader and not found → account does not exist
         if (server.isLeader()) {
             responseObserver.onNext(
                     GetBalanceResponse.newBuilder()
@@ -109,7 +104,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
             return;
         }
 
-        // Not leader & not found → forward to leader
         System.out.println("Account not found locally, forwarding getBalance to leader");
 
         try {
@@ -128,9 +122,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
         responseObserver.onCompleted();
     }
 
-
-    /* ---------------- TX CALLBACKS ---------------- */
-
     @Override
     public void onGlobalCommit() {
         updateAccount();
@@ -142,8 +133,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
         transactionStatus = false;
         System.out.println("Transaction Aborted by the Coordinator");
     }
-
-    /* ---------------- INTERNAL HELPERS ---------------- */
 
     private void updateAccount() {
         if (tempDataHolder != null) {
@@ -238,8 +227,6 @@ public class AccountServiceImpl extends AccountServiceGrpc.AccountServiceImplBas
             throw new RuntimeException(e);
         }
     }
-
-    /* ---------------- DATA HOLDER CLASS ---------------- */
 
     private static class AccountData {
         String accountId;

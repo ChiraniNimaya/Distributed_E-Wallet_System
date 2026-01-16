@@ -1,7 +1,6 @@
 package com.ewallet.partition;
 
 import com.ewallet.lock.*;
-import com.ewallet.nameservice.NameServiceClient;
 import com.ewallet.partition.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -16,14 +15,11 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         implements DistributedTxListener {
 
     private final PartitionServer server;
-    private static final String NAME_SERVICE_ADDRESS = "http://localhost:2379";
 
-    // Transaction state holders
     private TransferData tempTransferData;
     private boolean transactionStatus = false;
     private String failureReason = "";
 
-    // For 2PC operations
     private String pendingTransactionId;
     private String pendingOperation; // "DEBIT" or "CREDIT"
 
@@ -46,16 +42,14 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         failureReason = "";
 
         if (server.isLeader()) {
-            // Act as primary
             try {
                 boolean fromInThisPartition = server.hasAccount(fromAccount);
                 boolean toInThisPartition = server.hasAccount(toAccount);
 
                 if (fromInThisPartition && toInThisPartition) {
-                    // Within-partition transfer using distributed transaction
                     System.out.println("Within-partition transfer as Primary");
 
-                    // PRE-VALIDATION: Check before starting distributed transaction
+                    // Check before starting distributed transaction
                     String validationError = validateTransfer(fromAccount, toAccount, amount);
                     if (validationError != null) {
                         System.out.println("Transfer validation failed: " + validationError);
@@ -73,14 +67,12 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
                         return;
                     }
 
-                    // Validation passed, proceed with distributed transaction
                     DistributedTxCoordinator txCoordinator = new DistributedTxCoordinator(this);
                     startDistributedTxForTransfer(txCoordinator, fromAccount, toAccount, amount, transactionId);
                     updateSecondaryServersForTransfer(fromAccount, toAccount, amount, transactionId);
                     System.out.println("Going to perform transfer transaction");
                     txCoordinator.perform();
                 } else {
-                    // Cross-partition transfer - use 2PC (traditional approach)
                     System.out.println("Cross-partition transfer using 2PC");
                     TwoPhaseCommitCoordinator coordinator = new TwoPhaseCommitCoordinator(server);
                     TransferResponse crossPartitionResponse = coordinator.executeTransfer(
@@ -97,15 +89,12 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
                 failureReason = "Internal error: " + e.getMessage();
             }
         } else {
-            // Act as secondary
             if (request.getIsSentByPrimary()) {
                 System.out.println("Processing transfer on secondary, on Primary's command");
 
-                // Create a new participant for this specific transfer
                 DistributedTxParticipant txParticipant = new DistributedTxParticipant(this);
                 startDistributedTxForTransfer(txParticipant, fromAccount, toAccount, amount, transactionId);
 
-                // Validate the transfer
                 boolean fromInThisPartition = server.hasAccount(fromAccount);
                 boolean toInThisPartition = server.hasAccount(toAccount);
 
@@ -120,12 +109,10 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
                         txParticipant.voteAbort();
                     }
                 } else {
-                    // Cross-partition on secondary - shouldn't happen normally
                     System.out.println("Cross-partition request on secondary - voting ABORT");
                     txParticipant.voteAbort();
                 }
             } else {
-                // Forward to primary
                 System.out.println("Not leader, forwarding transfer to primary...");
                 TransferResponse response = callPrimary(fromAccount, toAccount, amount, transactionId);
 
@@ -146,22 +133,15 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         responseObserver.onCompleted();
     }
 
-    /**
-     * Validate transfer before executing
-     * @return null if valid, error message if invalid
-     */
     private String validateTransfer(String fromAccount, String toAccount, double amount) {
-        // Check if source account exists
         if (!server.hasAccount(fromAccount)) {
             return "Source account not found: " + fromAccount;
         }
 
-        // Check if destination account exists
         if (!server.hasAccount(toAccount)) {
             return "Destination account not found: " + toAccount;
         }
 
-        // Check balance
         Double fromBalance = server.getBalance(fromAccount);
         if (fromBalance == null) {
             return "Unable to retrieve balance for account: " + fromAccount;
@@ -171,7 +151,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
             return "Insufficient balance. Current balance: " + fromBalance + ", Required: " + amount;
         }
 
-        // Check for valid amount
         if (amount <= 0) {
             return "Invalid transfer amount: " + amount;
         }
@@ -193,15 +172,13 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         boolean canCommit;
 
         if (server.isLeader() && !isSentByPrimary) {
-            // This is a 2PC prepare from remote partition coordinator
-            // We need to use distributed transaction to replicate to our secondaries
-            System.out.println("Leader received 2PC prepare - will replicate to secondaries using distributed tx");
+            System.out.println("Leader received prepare request - will replicate to secondaries");
 
             // Store the operation details for execution on commit
             pendingTransactionId = transactionId;
             pendingOperation = operation;
 
-            // Validate locally first
+            // Validate locally
             if ("DEBIT".equals(operation)) {
                 canCommit = server.prepareDebit(transactionId, accountId, amount);
             } else {
@@ -220,17 +197,15 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
                     // Replicate prepare to secondaries
                     replicatePrepareToSecondaries(transactionId, accountId, amount, operation);
 
-                    System.out.println("Prepare replicated to secondaries via gRPC");
+                    System.out.println("Prepare replicated to secondaries");
                 } catch (Exception e) {
                     System.err.println("Error replicating prepare: " + e.getMessage());
                     e.printStackTrace();
                 }
             }
         } else if (!server.isLeader() && isSentByPrimary) {
-            // This is from our partition leader for 2PC operation
-            System.out.println("Secondary received 2PC prepare from partition leader");
+            System.out.println("Secondary received prepare request from partition leader");
 
-            // Execute prepare locally and participate in distributed transaction
             if ("DEBIT".equals(operation)) {
                 canCommit = server.prepareDebit(transactionId, accountId, amount);
             } else {
@@ -242,7 +217,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
             pendingOperation = operation;
             tempTransferData = new TransferData(accountId, accountId, amount, transactionId, operation);
         } else {
-            // Normal prepare (shouldn't happen in current flow)
             if ("DEBIT".equals(operation)) {
                 canCommit = server.prepareDebit(transactionId, accountId, amount);
             } else {
@@ -271,26 +245,21 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         boolean success;
 
         if (server.isLeader() && !isSentByPrimary) {
-            // This is a 2PC commit from remote partition coordinator
-            // Commit locally first
+            // Commit locally
             success = server.commitTransaction(transactionId);
 
             if (success) {
                 System.out.println("Leader committed locally, now replicating to secondaries");
-                // Replicate commit to secondaries
                 replicateCommitToSecondaries(transactionId);
             }
         } else if (!server.isLeader() && isSentByPrimary) {
-            // This is from our partition leader
             System.out.println("Secondary received commit from partition leader");
             success = server.commitTransaction(transactionId);
 
-            // Clean up pending state
             pendingTransactionId = null;
             pendingOperation = null;
             tempTransferData = null;
         } else {
-            // Normal commit
             success = server.commitTransaction(transactionId);
         }
 
@@ -314,18 +283,14 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         boolean success;
 
         if (server.isLeader() && !isSentByPrimary) {
-            // This is a 2PC abort from remote partition coordinator
             success = server.abortTransaction(transactionId);
 
             if (success) {
-                // Replicate abort to secondaries
                 replicateAbortToSecondaries(transactionId);
             }
         } else if (!server.isLeader() && isSentByPrimary) {
-            // This is from our partition leader
             success = server.abortTransaction(transactionId);
 
-            // Clean up pending state
             pendingTransactionId = null;
             pendingOperation = null;
             tempTransferData = null;
@@ -342,8 +307,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         responseObserver.onNext(response);
         responseObserver.onCompleted();
     }
-
-    /* ---------------- REPLICATION HELPERS FOR 2PC ---------------- */
 
     private void replicatePrepareToSecondaries(String transactionId, String accountId,
                                                double amount, String operation) {
@@ -472,8 +435,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         }
     }
 
-    /* ---------------- TX CALLBACKS ---------------- */
-
     @Override
     public void onGlobalCommit() {
         System.out.println("Received GLOBAL_COMMIT callback");
@@ -489,8 +450,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         System.out.println("Transfer Transaction Aborted by the Coordinator");
     }
 
-    /* ---------------- INTERNAL HELPERS ---------------- */
-
     private void executeTransfer() {
         if (tempTransferData != null) {
             String fromAccount = tempTransferData.fromAccount;
@@ -501,7 +460,6 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
             System.out.println("Executing transfer: " + fromAccount + " -> " + toAccount +
                     ", amount=" + amount);
 
-            // Execute the actual transfer
             boolean debitPrepared = server.prepareDebit(transactionId, fromAccount, amount);
             if (!debitPrepared) {
                 System.out.println("Transfer failed: Insufficient balance");
@@ -641,14 +599,12 @@ public class TransferServiceImpl extends TransferServiceGrpc.TransferServiceImpl
         }
     }
 
-    /* ---------------- DATA HOLDER CLASS ---------------- */
-
     private static class TransferData {
         String fromAccount;
         String toAccount;
         double amount;
         String transactionId;
-        String operation; // For 2PC: "DEBIT" or "CREDIT"
+        String operation;
 
         TransferData(String fromAccount, String toAccount, double amount, String transactionId, String operation) {
             this.fromAccount = fromAccount;

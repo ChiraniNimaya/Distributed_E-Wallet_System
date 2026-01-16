@@ -20,7 +20,7 @@ public final class PartitionResolver {
 
     private static void validate(String accountId, int partitionCount) {
         if (accountId == null || accountId.isEmpty()) {
-            throw new IllegalArgumentException("accountId cannot be null or empty");
+            throw new IllegalArgumentException("Account Id cannot be null or empty");
         }
 
         if (!accountId.matches("\\d+")) {
