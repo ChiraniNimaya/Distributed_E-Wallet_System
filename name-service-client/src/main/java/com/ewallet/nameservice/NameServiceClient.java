@@ -35,7 +35,7 @@ public class NameServiceClient {
         ServiceDetails serviceDetails = new ServiceDetails().populate(etcdResponse);
 
         while (serviceDetails == null) {
-            System.out.println("Couldn't find details of service " + serviceName + ", retrying in 5 seconds.");
+            System.out.println("Could not find details of service " + serviceName + ", retrying in 5 seconds.");
             Thread.sleep(5000);
             etcdResponse = etcdClient.get(serviceName);
             serviceDetails = new ServiceDetails().populate(etcdResponse);

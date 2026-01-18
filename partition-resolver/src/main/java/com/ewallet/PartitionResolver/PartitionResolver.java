@@ -24,11 +24,11 @@ public final class PartitionResolver {
         }
 
         if (!accountId.matches("\\d+")) {
-            throw new IllegalArgumentException("accountId must be numeric");
+            throw new IllegalArgumentException("Account Id must be numeric");
         }
 
         if (partitionCount <= 0) {
-            throw new IllegalArgumentException("partitionCount must be > 0");
+            throw new IllegalArgumentException("PartitionCount must be > 0");
         }
     }
 
