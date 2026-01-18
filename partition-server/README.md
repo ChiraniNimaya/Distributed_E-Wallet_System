@@ -46,7 +46,7 @@ cd etcd-v3.4.15
 Step 3: Start Partition Servers
 
 Navigate to the server project:
-cd Distributed\ E-Wallet\ System/partition-server
+cd W21706165/partition-server
 
 Partition 0:
 java -jar target/partition-server-1.0-SNAPSHOT-jar-with-dependencies.jar 11000 0
@@ -63,10 +63,20 @@ java -jar target/partition-server-1.0-SNAPSHOT-jar-with-dependencies.jar 11005 1
 Step 4: Start Clients
 
 Navigate to the client project:
-cd Distributed\ E-Wallet\ System/ewallet-client
+cd W21706165/ewallet-client
 
 Clerk Client:
 java -jar target/ewallet-client-1.0-SNAPSHOT-jar-with-dependencies.jar clerk
 
 Regular Client:
 java -jar target/ewallet-client-1.0-SNAPSHOT-jar-with-dependencies.jar client
+
+
+
+
+Limitations:
+-Requires ZooKeeper dependency
+-Higher latency of two phase commit structure
+-Write bottleneck at leader and temporary unavailability during election
+-No persistence to disk or database
+-No mechanism for authorization and authentication
